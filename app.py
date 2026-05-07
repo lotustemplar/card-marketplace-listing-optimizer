@@ -214,13 +214,34 @@ def main() -> None:
     render_summary(result)
 
     filename = f"card_listing_output_{datetime.now().strftime('%Y-%m-%d_%H%M')}.xlsx"
-    st.download_button(
-        "Download Optimized Listing Workbook",
-        data=workbook_bytes,
-        file_name=filename,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-    )
+    csv_timestamp = datetime.now().strftime("%Y-%m-%d_%H%M")
+    download_one, download_two, download_three = st.columns(3)
+    with download_one:
+        st.download_button(
+            "Download Optimized Listing Workbook",
+            data=workbook_bytes,
+            file_name=filename,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+    with download_two:
+        st.download_button(
+            "Download Manapool CSV",
+            data=result.manapool_csv_df.to_csv(index=False).encode("utf-8-sig"),
+            file_name=f"manapool_upload_{csv_timestamp}.csv",
+            mime="text/csv",
+            use_container_width=True,
+            disabled=result.manapool_csv_df.empty,
+        )
+    with download_three:
+        st.download_button(
+            "Download TCGPlayer Direct CSV",
+            data=result.direct_csv_df.to_csv(index=False).encode("utf-8-sig"),
+            file_name=f"tcgplayer_direct_upload_{csv_timestamp}.csv",
+            mime="text/csv",
+            use_container_width=True,
+            disabled=result.direct_csv_df.empty,
+        )
 
     st.subheader("Manapool Sheet Preview")
     st.dataframe(result.manapool_preview_df, use_container_width=True, hide_index=True)
