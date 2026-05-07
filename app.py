@@ -16,7 +16,10 @@ st.set_page_config(
 )
 
 
-BUILTIN_DIRECT_FEE_PATH = Path(__file__).parent / "assets" / "DIRECT vs PWE CALC.xlsx"
+DIRECT_FEE_CANDIDATE_PATHS = [
+    Path(__file__).parent / "DIRECT vs PWE CALC.xlsx",
+    Path(__file__).parent / "assets" / "DIRECT vs PWE CALC.xlsx",
+]
 
 
 def get_configured_password() -> str | None:
@@ -105,9 +108,10 @@ def render_summary(result) -> None:
 
 
 def load_builtin_direct_fee_file() -> tuple[bytes | None, str | None]:
-    if not BUILTIN_DIRECT_FEE_PATH.exists():
-        return None, None
-    return BUILTIN_DIRECT_FEE_PATH.read_bytes(), BUILTIN_DIRECT_FEE_PATH.name
+    for candidate_path in DIRECT_FEE_CANDIDATE_PATHS:
+        if candidate_path.exists():
+            return candidate_path.read_bytes(), candidate_path.name
+    return None, None
 
 
 def main() -> None:
@@ -170,7 +174,7 @@ def main() -> None:
     if built_in_fee_bytes:
         st.success(f"Built-in Direct fee table loaded: `{built_in_fee_name}`")
     else:
-        st.info("Built-in Direct fee table not added yet. Attach `DIRECT vs PWE CALC.xlsx` here once and I can bundle it into the app.")
+        st.info("Built-in Direct fee table not added yet. Add `DIRECT vs PWE CALC.xlsx` to the repo root or `assets/` and the app will use it automatically.")
     generate_clicked = st.button("Generate Listing Sheets", type="primary", use_container_width=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -183,7 +187,7 @@ def main() -> None:
         return
 
     if not built_in_fee_bytes or not built_in_fee_name:
-        st.error("The built-in Direct fee table has not been added yet. Attach `DIRECT vs PWE CALC.xlsx` here and I'll bundle it into the app.")
+        st.error("The built-in Direct fee table has not been added yet. Add `DIRECT vs PWE CALC.xlsx` to the repo root or `assets/` and the app will use it automatically.")
         return
 
     try:
