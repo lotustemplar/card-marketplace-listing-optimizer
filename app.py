@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import pickle
 from datetime import datetime
 from pathlib import Path
 
@@ -114,6 +115,57 @@ def load_builtin_direct_fee_file() -> tuple[bytes | None, str | None]:
     return None, None
 
 
+def render_result(result, workbook_bytes: bytes, timestamp: str) -> None:
+    if result.missing_columns:
+        st.error(f"Required columns are missing from the TCGPlayer CSV: {', '.join(result.missing_columns)}")
+    else:
+        st.success("Workbook generated successfully.")
+
+    if result.warning_message:
+        st.warning(result.warning_message)
+
+    render_summary(result)
+
+    filename = f"card_listing_output_{timestamp}.xlsx"
+    download_one, download_two, download_three = st.columns(3)
+    with download_one:
+        st.download_button(
+            "Download Optimized Listing Workbook",
+            data=workbook_bytes,
+            file_name=filename,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+    with download_two:
+        st.download_button(
+            "Download Manapool CSV",
+            data=result.manapool_csv_df.to_csv(index=False).encode("utf-8-sig"),
+            file_name=f"manapool_upload_{timestamp}.csv",
+            mime="text/csv",
+            use_container_width=True,
+            disabled=result.manapool_csv_df.empty,
+        )
+    with download_three:
+        st.download_button(
+            "Download TCGPlayer Direct CSV",
+            data=result.direct_csv_df.to_csv(index=False).encode("utf-8-sig"),
+            file_name=f"tcgplayer_direct_upload_{timestamp}.csv",
+            mime="text/csv",
+            use_container_width=True,
+            disabled=result.direct_csv_df.empty,
+        )
+
+    st.subheader("Manapool Sheet Preview")
+    st.dataframe(result.manapool_preview_df, use_container_width=True, hide_index=True)
+
+    st.subheader("TCGPlayer Direct Sheet Preview")
+    st.dataframe(result.direct_preview_df, use_container_width=True, hide_index=True)
+
+    if not result.errors_df.empty:
+        st.subheader("Errors Sheet Preview")
+        st.dataframe(result.errors_df, use_container_width=True, hide_index=True)
+
+
 def main() -> None:
     require_password_if_needed()
 
@@ -178,80 +230,43 @@ def main() -> None:
     generate_clicked = st.button("Generate Listing Sheets", type="primary", use_container_width=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
-    if not generate_clicked:
+    if generate_clicked:
+        if tcgplayer_file is None:
+            st.error("Please upload the TCGPlayer CSV export.")
+            return
+
+        if not built_in_fee_bytes or not built_in_fee_name:
+            st.error("The built-in Direct fee table has not been added yet. Add `DIRECT vs PWE CALC.xlsx` to the repo root or `assets/` and the app will use it automatically.")
+            return
+
+        try:
+            result = process_files(
+                tcgplayer_bytes=tcgplayer_file.getvalue(),
+                direct_fee_bytes=built_in_fee_bytes,
+                direct_fee_filename=built_in_fee_name,
+                settings=settings,
+            )
+            workbook_bytes = build_workbook(result)
+            st.session_state["optimizer_result"] = pickle.dumps(result)
+            st.session_state["optimizer_workbook_bytes"] = workbook_bytes
+            st.session_state["optimizer_timestamp"] = datetime.now().strftime("%Y-%m-%d_%H%M")
+        except Exception as exc:
+            st.error(f"Processing failed: {exc}")
+            return
+
+    stored_result = st.session_state.get("optimizer_result")
+    stored_workbook_bytes = st.session_state.get("optimizer_workbook_bytes")
+    stored_timestamp = st.session_state.get("optimizer_timestamp")
+
+    if not stored_result or not stored_workbook_bytes or not stored_timestamp:
         st.info("Upload your TCGPlayer CSV, adjust any settings you want in the sidebar, and generate the workbook.")
         return
 
-    if tcgplayer_file is None:
-        st.error("Please upload the TCGPlayer CSV export.")
-        return
-
-    if not built_in_fee_bytes or not built_in_fee_name:
-        st.error("The built-in Direct fee table has not been added yet. Add `DIRECT vs PWE CALC.xlsx` to the repo root or `assets/` and the app will use it automatically.")
-        return
-
-    try:
-        tcgplayer_bytes = tcgplayer_file.getvalue()
-        result = process_files(
-            tcgplayer_bytes=tcgplayer_bytes,
-            direct_fee_bytes=built_in_fee_bytes,
-            direct_fee_filename=built_in_fee_name,
-            settings=settings,
-        )
-        workbook_bytes = build_workbook(result)
-    except Exception as exc:
-        st.error(f"Processing failed: {exc}")
-        return
-
-    if result.missing_columns:
-        st.error(f"Required columns are missing from the TCGPlayer CSV: {', '.join(result.missing_columns)}")
-    else:
-        st.success("Workbook generated successfully.")
-
-    if result.warning_message:
-        st.warning(result.warning_message)
-
-    render_summary(result)
-
-    filename = f"card_listing_output_{datetime.now().strftime('%Y-%m-%d_%H%M')}.xlsx"
-    csv_timestamp = datetime.now().strftime("%Y-%m-%d_%H%M")
-    download_one, download_two, download_three = st.columns(3)
-    with download_one:
-        st.download_button(
-            "Download Optimized Listing Workbook",
-            data=workbook_bytes,
-            file_name=filename,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
-    with download_two:
-        st.download_button(
-            "Download Manapool CSV",
-            data=result.manapool_csv_df.to_csv(index=False).encode("utf-8-sig"),
-            file_name=f"manapool_upload_{csv_timestamp}.csv",
-            mime="text/csv",
-            use_container_width=True,
-            disabled=result.manapool_csv_df.empty,
-        )
-    with download_three:
-        st.download_button(
-            "Download TCGPlayer Direct CSV",
-            data=result.direct_csv_df.to_csv(index=False).encode("utf-8-sig"),
-            file_name=f"tcgplayer_direct_upload_{csv_timestamp}.csv",
-            mime="text/csv",
-            use_container_width=True,
-            disabled=result.direct_csv_df.empty,
-        )
-
-    st.subheader("Manapool Sheet Preview")
-    st.dataframe(result.manapool_preview_df, use_container_width=True, hide_index=True)
-
-    st.subheader("TCGPlayer Direct Sheet Preview")
-    st.dataframe(result.direct_preview_df, use_container_width=True, hide_index=True)
-
-    if not result.errors_df.empty:
-        st.subheader("Errors Sheet Preview")
-        st.dataframe(result.errors_df, use_container_width=True, hide_index=True)
+    render_result(
+        result=pickle.loads(stored_result),
+        workbook_bytes=stored_workbook_bytes,
+        timestamp=stored_timestamp,
+    )
 
 
 if __name__ == "__main__":
