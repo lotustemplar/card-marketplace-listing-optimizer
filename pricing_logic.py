@@ -55,6 +55,7 @@ COLUMN_ALIASES = {
     "TCG Market Price": ["tcg market price", "tcgmarketprice"],
     "TCG Direct Low": ["tcg direct low", "tcgdirectlow"],
     "TCG Low Price": ["tcg low price", "tcglowprice"],
+    "TCG Marketplace Price": ["tcg marketplace price", "tcgmarketplaceprice"],
     "Total Quantity": ["total quantity", "totalquantity"],
     "Add to Quantity": ["add to quantity", "addtoquantity"],
 }
@@ -117,6 +118,8 @@ class ProcessResult:
     direct_full_df: pd.DataFrame
     manapool_preview_df: pd.DataFrame
     direct_preview_df: pd.DataFrame
+    manapool_csv_df: pd.DataFrame
+    direct_csv_df: pd.DataFrame
     errors_df: pd.DataFrame
     analysis_df: pd.DataFrame
     summary: dict[str, Any]
@@ -290,6 +293,31 @@ def build_error_row(row: pd.Series | None, error_reason: str, source_columns: li
     return payload
 
 
+def build_upload_row(
+    row: pd.Series,
+    source_columns: list[str],
+    column_map: dict[str, str],
+    quantity: int | float,
+    listing_price: float,
+) -> dict[str, Any]:
+    upload_row = {column: safe_text(row.get(column, "")) for column in source_columns}
+    formatted_price = f"{listing_price:.2f}"
+    formatted_quantity = str(normalize_quantity(float(quantity)))
+
+    marketplace_price_column = column_map.get("TCG Marketplace Price")
+    if marketplace_price_column:
+        upload_row[marketplace_price_column] = formatted_price
+
+    add_to_quantity_column = column_map.get("Add to Quantity")
+    total_quantity_column = column_map.get("Total Quantity")
+    if add_to_quantity_column:
+        upload_row[add_to_quantity_column] = formatted_quantity
+    elif total_quantity_column:
+        upload_row[total_quantity_column] = formatted_quantity
+
+    return upload_row
+
+
 def sort_preview(df: pd.DataFrame, display_columns: list[str]) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=display_columns)
@@ -379,6 +407,8 @@ def process_files(
             direct_full_df=pd.DataFrame(columns=DISPLAY_COLUMNS_DIRECT + ["_bump_exceeded", "_cliff_affected"]),
             manapool_preview_df=pd.DataFrame(columns=DISPLAY_COLUMNS_MANAPOOL),
             direct_preview_df=pd.DataFrame(columns=DISPLAY_COLUMNS_DIRECT),
+            manapool_csv_df=pd.DataFrame(columns=source_columns),
+            direct_csv_df=pd.DataFrame(columns=source_columns),
             errors_df=errors_df,
             analysis_df=analysis_df,
             summary=summary,
@@ -389,6 +419,8 @@ def process_files(
 
     manapool_rows: list[dict[str, Any]] = []
     direct_rows: list[dict[str, Any]] = []
+    manapool_csv_rows: list[dict[str, Any]] = []
+    direct_csv_rows: list[dict[str, Any]] = []
     error_rows: list[dict[str, Any]] = []
 
     total_quantity_imported = 0.0
@@ -538,6 +570,7 @@ def process_files(
         }
 
         if destination == "direct":
+            direct_csv_rows.append(build_upload_row(row, source_columns, column_map, quantity, direct_listing_price))
             direct_rows.append(
                 {
                     **row_base,
@@ -554,6 +587,7 @@ def process_files(
         else:
             if manapool_price >= settings.tracked_shipping_threshold:
                 reason_parts.append("Review for tracked shipping threshold")
+            manapool_csv_rows.append(build_upload_row(row, source_columns, column_map, quantity, manapool_price))
             manapool_rows.append(
                 {
                     **row_base,
@@ -582,6 +616,8 @@ def process_files(
 
     manapool_preview_df = sort_preview(manapool_full_df, DISPLAY_COLUMNS_MANAPOOL)
     direct_preview_df = sort_preview(direct_full_df, DISPLAY_COLUMNS_DIRECT)
+    manapool_csv_df = pd.DataFrame(manapool_csv_rows, columns=source_columns)
+    direct_csv_df = pd.DataFrame(direct_csv_rows, columns=source_columns)
 
     manapool_total_net = 0.0
     direct_total_net = 0.0
@@ -630,6 +666,8 @@ def process_files(
         direct_full_df=direct_full_df.sort_values("Product Name", key=lambda series: series.astype(str).str.lower()).reset_index(drop=True),
         manapool_preview_df=manapool_preview_df,
         direct_preview_df=direct_preview_df,
+        manapool_csv_df=manapool_csv_df,
+        direct_csv_df=direct_csv_df,
         errors_df=errors_df,
         analysis_df=analysis_df,
         summary=summary,
