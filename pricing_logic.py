@@ -104,7 +104,7 @@ SETTING_LABELS = {
     "tracked_shipping_cost": "Tracked shipping cost",
 }
 
-USER_AGENT = "CardMarketplaceListingOptimizer/0.6 (+https://github.com/lotustemplar/card-marketplace-listing-optimizer)"
+USER_AGENT = "CardMarketplaceListingOptimizer/0.7 (+https://github.com/lotustemplar/card-marketplace-listing-optimizer)"
 MANAPOOL_API_BASE_URL = "https://manapool.com/api/v1/"
 MANAPOOL_CARD_INFO_ENDPOINT = "card_info"
 MANAPOOL_TIMEOUT_SECONDS = 20
@@ -151,7 +151,7 @@ class OptimizerSettings:
         rows.append(
             {
                 "Metric": "Mana Pool price source",
-                "Value": "Mana Pool API /card_info endpoint, using API returned floor pricing when a match is found, otherwise TCG fallback pricing",
+                "Value": "Mana Pool API /card_info endpoint with optional manual match overrides, otherwise TCG fallback pricing",
             }
         )
         return rows
@@ -170,6 +170,7 @@ class ProcessResult:
     summary: dict[str, Any]
     settings: OptimizerSettings
     missing_columns: list[str]
+    unresolved_options: list[dict[str, Any]]
     warning_message: str | None = None
 
 
@@ -190,6 +191,16 @@ def normalize_header(value: Any) -> str:
 def normalize_identifier(value: Any) -> str:
     text = "" if value is None else str(value).strip().lower()
     return "".join(char for char in text if char.isalnum())
+
+
+def build_row_key(product_name: str, set_name: str, card_number: str) -> str:
+    return "||".join(
+        [
+            normalize_header(product_name),
+            normalize_header(set_name),
+            normalize_identifier(card_number),
+        ]
+    )
 
 
 def parse_uploaded_csv(file_bytes: bytes) -> pd.DataFrame:
@@ -407,18 +418,44 @@ def fetch_manapool_cards_by_names(
     return cards_by_name
 
 
+def build_candidate_option(card: dict[str, Any]) -> dict[str, Any] | None:
+    cents_value, parse_error = try_parse_number(card.get("from_price_cents"))
+    if parse_error or cents_value is None:
+        return None
+    price = round(cents_value / 100.0, 2)
+    name = safe_text(card.get("name", ""))
+    set_name = safe_text(card.get("set_name", ""))
+    set_code = safe_text(card.get("set_code", ""))
+    card_number = safe_text(card.get("card_number", ""))
+    set_display = set_name or set_code or "Unknown set"
+    label = f"{name or 'Unknown card'} | {set_display}"
+    if card_number:
+        label += f" | #{card_number}"
+    label += f" | ${price:.2f}"
+    return {
+        "label": label,
+        "price": price,
+        "name": name,
+        "set_name": set_name,
+        "set_code": set_code,
+        "card_number": card_number,
+    }
+
+
 def load_manapool_price_lookup(
     tcg_df: pd.DataFrame,
     column_map: dict[str, str],
     manapool_api_key: str | None,
     manapool_email: str | None,
-) -> tuple[dict[tuple[str, str, str], float], dict[tuple[str, str, str], str], str | None]:
+    manapool_match_overrides: dict[str, dict[str, Any]] | None = None,
+) -> tuple[dict[tuple[str, str, str], float], dict[tuple[str, str, str], str], str | None, list[dict[str, Any]], int]:
     product_name_column = column_map.get("Product Name")
     set_name_column = column_map.get("Set Name")
     number_column = column_map.get("Number")
     if not product_name_column or not set_name_column:
-        return {}, {}, None
+        return {}, {}, None, [], 0
 
+    overrides = manapool_match_overrides or {}
     unique_keys = sorted(
         {
             (
@@ -431,7 +468,7 @@ def load_manapool_price_lookup(
         }
     )
     if not unique_keys:
-        return {}, {}, None
+        return {}, {}, None, [], 0
 
     unique_names = sorted({product_name for product_name, _, _ in unique_keys})
     try:
@@ -440,31 +477,67 @@ def load_manapool_price_lookup(
             batch = unique_names[start : start + MANAPOOL_BATCH_SIZE]
             cards_by_name.update(fetch_manapool_cards_by_names(batch, manapool_api_key, manapool_email))
     except Exception as exc:
-        return {}, {}, f"Mana Pool API lookup was unavailable, so TCG fallback pricing was used instead. Details: {exc}"
+        return {}, {}, f"Mana Pool API lookup was unavailable, so TCG fallback pricing was used instead. Details: {exc}", [], 0
 
     price_lookup: dict[tuple[str, str, str], float] = {}
     source_lookup: dict[tuple[str, str, str], str] = {}
+    unresolved_options: list[dict[str, Any]] = []
     misses = 0
+    manual_override_count = 0
 
     for product_name, set_name, card_number in unique_keys:
-        row_key = (normalize_header(product_name), normalize_header(set_name), normalize_identifier(card_number))
-        match = choose_manapool_match(cards_by_name.get(normalize_header(product_name), []), product_name, set_name, card_number)
-        if not match:
-            misses += 1
-            continue
+        row_tuple = (normalize_header(product_name), normalize_header(set_name), normalize_identifier(card_number))
+        row_key = build_row_key(product_name, set_name, card_number)
 
-        cents_value, parse_error = try_parse_number(match.get("from_price_cents"))
-        if parse_error or cents_value is None:
-            misses += 1
-            continue
+        if row_key in overrides:
+            override = overrides[row_key]
+            override_price, parse_error = try_parse_number(override.get("price"))
+            if parse_error is None and override_price is not None:
+                price_lookup[row_tuple] = round(override_price, 2)
+                source_lookup[row_tuple] = override.get("reason", "Mana Pool manual override")
+                manual_override_count += 1
+                continue
 
-        price_lookup[row_key] = round(cents_value / 100.0, 2)
-        source_lookup[row_key] = "Mana Pool API floor"
+        candidates = cards_by_name.get(normalize_header(product_name), [])
+        match = choose_manapool_match(candidates, product_name, set_name, card_number)
+        if match:
+            cents_value, parse_error = try_parse_number(match.get("from_price_cents"))
+            if parse_error is None and cents_value is not None:
+                price_lookup[row_tuple] = round(cents_value / 100.0, 2)
+                source_lookup[row_tuple] = "Mana Pool API floor"
+                continue
+
+        options: list[dict[str, Any]] = []
+        seen_labels: set[str] = set()
+        for candidate in candidates:
+            option = build_candidate_option(candidate)
+            if not option:
+                continue
+            if option["label"] in seen_labels:
+                continue
+            seen_labels.add(option["label"])
+            options.append(option)
+
+        if options:
+            unresolved_options.append(
+                {
+                    "row_key": row_key,
+                    "product_name": product_name,
+                    "set_name": set_name,
+                    "number": card_number,
+                    "options": options,
+                }
+            )
+
+        misses += 1
 
     warnings: list[str] = []
     if misses:
         warnings.append(f"Mana Pool API lookup matched {len(price_lookup)} row key(s). {misses} row key(s) fell back to TCG pricing.")
-    return price_lookup, source_lookup, "\n\n".join(warnings) if warnings else None
+    if manual_override_count:
+        warnings.append(f"Applied {manual_override_count} manual Mana Pool match override(s).")
+
+    return price_lookup, source_lookup, "\n\n".join(warnings) if warnings else None, unresolved_options, manual_override_count
 
 
 def build_analysis_dataframe(summary: dict[str, Any], settings: OptimizerSettings) -> pd.DataFrame:
@@ -481,11 +554,12 @@ def build_analysis_dataframe(summary: dict[str, Any], settings: OptimizerSetting
         {"Metric": "Number of cards with missing price data", "Value": summary["missing_price_data_count"]},
         {
             "Metric": f"Number of cards forced to Manapool ${settings.manapool_min_price:.2f} minimum",
-            "Value": summary["forced_manapool_min_count"],
-        },
+            "Value": summary["forced_manapool_min_count"]},
         {"Metric": "Number of cards where Direct bump exceeded max allowed %", "Value": summary["direct_bump_exceeded_count"]},
         {"Metric": "Cards priced from Mana Pool API", "Value": summary["manapool_api_price_count"]},
         {"Metric": "Cards priced from TCG fallback", "Value": summary["manapool_fallback_price_count"]},
+        {"Metric": "Manual Mana Pool overrides applied", "Value": summary["manual_override_count"]},
+        {"Metric": "Rows with unresolved Mana Pool candidates", "Value": summary["unresolved_candidate_count"]},
         {"Metric": "Manapool listings at or above tracked shipping threshold", "Value": summary["tracked_shipping_review_count"]},
         {
             "Metric": "Tracked shipping review warning",
@@ -506,6 +580,7 @@ def process_files(
     settings: OptimizerSettings,
     manapool_api_key: str | None = None,
     manapool_email: str | None = None,
+    manapool_match_overrides: dict[str, dict[str, Any]] | None = None,
 ) -> ProcessResult:
     tcg_df = load_tcgplayer_dataframe(tcgplayer_bytes)
     column_map, missing_columns = map_tcgplayer_columns(tcg_df)
@@ -536,6 +611,8 @@ def process_files(
             "direct_bump_exceeded_count": 0,
             "manapool_api_price_count": 0,
             "manapool_fallback_price_count": 0,
+            "manual_override_count": 0,
+            "unresolved_candidate_count": 0,
             "tracked_shipping_review_count": 0,
         }
         analysis_df = build_analysis_dataframe(summary, settings)
@@ -551,14 +628,16 @@ def process_files(
             summary=summary,
             settings=settings,
             missing_columns=missing_columns,
+            unresolved_options=[],
             warning_message="Required columns are missing from the TCGPlayer export.",
         )
 
-    manapool_price_lookup, manapool_source_lookup, manapool_lookup_warning = load_manapool_price_lookup(
+    manapool_price_lookup, manapool_source_lookup, manapool_lookup_warning, unresolved_options, manual_override_count = load_manapool_price_lookup(
         tcg_df,
         column_map,
         manapool_api_key,
         manapool_email,
+        manapool_match_overrides,
     )
 
     manapool_rows: list[dict[str, Any]] = []
@@ -620,16 +699,16 @@ def process_files(
         product_name = safe_text(row.get(column_map["Product Name"], ""))
         set_name = safe_text(row.get(column_map["Set Name"], ""))
         card_number = safe_text(row.get(column_map.get("Number", ""), "")) if column_map.get("Number") else ""
-        row_key = (
+        row_tuple = (
             normalize_header(product_name),
             normalize_header(set_name),
             normalize_identifier(card_number),
         )
 
-        api_manapool_price = manapool_price_lookup.get(row_key)
+        api_manapool_price = manapool_price_lookup.get(row_tuple)
         if api_manapool_price is not None:
             chosen_manapool_base = api_manapool_price
-            manapool_price_source = manapool_source_lookup.get(row_key, "Mana Pool API floor")
+            manapool_price_source = manapool_source_lookup.get(row_tuple, "Mana Pool API floor")
             manapool_api_price_count += 1
         else:
             chosen_manapool_base = low_price if low_price is not None else market_price
@@ -775,6 +854,8 @@ def process_files(
         "direct_bump_exceeded_count": direct_bump_exceeded_count,
         "manapool_api_price_count": manapool_api_price_count,
         "manapool_fallback_price_count": manapool_fallback_price_count,
+        "manual_override_count": manual_override_count,
+        "unresolved_candidate_count": len(unresolved_options),
         "tracked_shipping_review_count": tracked_shipping_review_count,
     }
 
@@ -799,5 +880,6 @@ def process_files(
         summary=summary,
         settings=settings,
         missing_columns=missing_columns,
+        unresolved_options=unresolved_options,
         warning_message="\n\n".join(warnings) if warnings else None,
     )
