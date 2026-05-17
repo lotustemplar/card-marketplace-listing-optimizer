@@ -11,7 +11,7 @@ from pricing_logic_bulk import OptimizerSettings, process_files
 from workbook_writer import build_workbook
 
 
-APP_VERSION = "0.3"
+APP_VERSION = "0.4"
 
 st.set_page_config(
     page_title="Card Marketplace Listing Optimizer",
