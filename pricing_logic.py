@@ -2,11 +2,9 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from io import BytesIO
-import base64
 import json
-import re
 from typing import Any
-from urllib import error, parse, request
+from urllib import error, request
 
 import pandas as pd
 
@@ -106,9 +104,9 @@ SETTING_LABELS = {
     "tracked_shipping_cost": "Tracked shipping cost",
 }
 
-USER_AGENT = "CardMarketplaceListingOptimizer/0.5 (+https://github.com/lotustemplar/card-marketplace-listing-optimizer)"
-MANAPOOL_BASE_URL = "https://manapool.com"
-MANAPOOL_OPENAPI_URL = "https://manapool.com/api/docs/v1/openapi.json"
+USER_AGENT = "CardMarketplaceListingOptimizer/0.6 (+https://github.com/lotustemplar/card-marketplace-listing-optimizer)"
+MANAPOOL_API_BASE_URL = "https://manapool.com/api/v1/"
+MANAPOOL_CARD_INFO_ENDPOINT = "card_info"
 MANAPOOL_TIMEOUT_SECONDS = 20
 MANAPOOL_BATCH_SIZE = 40
 
@@ -153,7 +151,7 @@ class OptimizerSettings:
         rows.append(
             {
                 "Metric": "Mana Pool price source",
-                "Value": "Mana Pool API only, using API returned floor pricing when a match is found, otherwise TCG fallback pricing",
+                "Value": "Mana Pool API /card_info endpoint, using API returned floor pricing when a match is found, otherwise TCG fallback pricing",
             }
         )
         return rows
@@ -332,7 +330,7 @@ def sort_preview(df: pd.DataFrame, display_columns: list[str]) -> pd.DataFrame:
     return sorted_df[display_columns]
 
 
-def request_json(url: str, *, method: str = "GET", headers: dict[str, str] | None = None, payload: Any | None = None) -> Any:
+def request_json(url: str, *, headers: dict[str, str] | None = None, payload: Any | None = None) -> Any:
     final_headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
     if headers:
         final_headers.update(headers)
@@ -340,7 +338,7 @@ def request_json(url: str, *, method: str = "GET", headers: dict[str, str] | Non
     if payload is not None:
         final_headers["Content-Type"] = "application/json"
         data = json.dumps(payload).encode("utf-8")
-    req = request.Request(url, headers=final_headers, method=method, data=data)
+    req = request.Request(url, headers=final_headers, method="POST" if payload is not None else "GET", data=data)
     try:
         with request.urlopen(req, timeout=MANAPOOL_TIMEOUT_SECONDS) as response:
             return json.loads(response.read().decode("utf-8"))
@@ -351,101 +349,15 @@ def request_json(url: str, *, method: str = "GET", headers: dict[str, str] | Non
         raise ValueError(f"Request failed: {exc.reason}") from exc
 
 
-def get_auth_header_variants(manapool_api_key: str | None, manapool_email: str | None) -> list[dict[str, str]]:
-    variants: list[dict[str, str]] = [{}]
+def build_manapool_headers(manapool_api_key: str | None, manapool_email: str | None) -> dict[str, str]:
     token = safe_text(manapool_api_key)
     email = safe_text(manapool_email)
+    headers: dict[str, str] = {}
     if token:
-        variants.append({"Authorization": f"Bearer {token}"})
-        variants.append({"X-API-Key": token})
-        variants.append({"api-key": token})
-        variants.append({"x-api-token": token})
-    if token and email:
-        basic = base64.b64encode(f"{email}:{token}".encode("utf-8")).decode("ascii")
-        variants.append({"Authorization": f"Basic {basic}"})
-        variants.append({"X-User-Email": email, "X-API-Key": token})
-        variants.append({"x-user-email": email, "x-api-token": token})
-    unique: list[dict[str, str]] = []
-    seen: set[tuple[tuple[str, str], ...]] = set()
-    for variant in variants:
-        key = tuple(sorted(variant.items()))
-        if key not in seen:
-            seen.add(key)
-            unique.append(variant)
-    return unique
-
-
-def schema_mentions_card_names(schema: Any) -> bool:
-    if isinstance(schema, dict):
-        if "card_names" in schema.get("properties", {}):
-            return True
-        return any(schema_mentions_card_names(value) for value in schema.values())
-    if isinstance(schema, list):
-        return any(schema_mentions_card_names(value) for value in schema)
-    return False
-
-
-def schema_mentions_from_price(schema: Any) -> bool:
-    if isinstance(schema, dict):
-        if "from_price_cents" in schema.get("properties", {}):
-            return True
-        return any(schema_mentions_from_price(value) for value in schema.values())
-    if isinstance(schema, list):
-        return any(schema_mentions_from_price(value) for value in schema)
-    return False
-
-
-def discover_manapool_cards_endpoint() -> tuple[str, str]:
-    spec = request_json(MANAPOOL_OPENAPI_URL)
-    paths = spec.get("paths", {}) if isinstance(spec, dict) else {}
-    best_score = -1
-    best_method = "POST"
-    best_path = ""
-
-    for path, path_item in paths.items():
-        if not isinstance(path_item, dict):
-            continue
-        for method, operation in path_item.items():
-            if method.lower() not in {"post", "get"}:
-                continue
-            if not isinstance(operation, dict):
-                continue
-
-            score = 0
-            request_body = operation.get("requestBody", {})
-            content = request_body.get("content", {}) if isinstance(request_body, dict) else {}
-            for content_value in content.values():
-                schema = content_value.get("schema", {}) if isinstance(content_value, dict) else {}
-                if schema_mentions_card_names(schema):
-                    score += 5
-
-            responses = operation.get("responses", {})
-            for response_value in responses.values():
-                response_content = response_value.get("content", {}) if isinstance(response_value, dict) else {}
-                for content_value in response_content.values():
-                    schema = content_value.get("schema", {}) if isinstance(content_value, dict) else {}
-                    if schema_mentions_from_price(schema):
-                        score += 5
-
-            flattened = json.dumps(operation).lower()
-            if "card_names" in flattened:
-                score += 3
-            if "from_price_cents" in flattened:
-                score += 3
-            if "not_found" in flattened:
-                score += 2
-            if re.search(r"/card|/cards", path.lower()):
-                score += 1
-
-            if score > best_score:
-                best_score = score
-                best_method = method.upper()
-                best_path = path
-
-    if not best_path:
-        raise ValueError("Unable to discover Mana Pool card-price endpoint from OpenAPI spec.")
-
-    return best_method, parse.urljoin(f"{MANAPOOL_BASE_URL}/", best_path.lstrip("/"))
+        headers["X-ManaPool-Access-Token"] = token
+    if email:
+        headers["X-ManaPool-Email"] = email
+    return headers
 
 
 def choose_manapool_match(cards: list[dict[str, Any]], product_name: str, set_name: str, card_number: str) -> dict[str, Any] | None:
@@ -476,43 +388,23 @@ def fetch_manapool_cards_by_names(
     card_names: list[str],
     manapool_api_key: str | None,
     manapool_email: str | None,
-) -> tuple[dict[str, list[dict[str, Any]]], str | None]:
+) -> dict[str, list[dict[str, Any]]]:
     if not card_names:
-        return {}, None
+        return {}
 
-    method, endpoint_url = discover_manapool_cards_endpoint()
-    auth_variants = get_auth_header_variants(manapool_api_key, manapool_email)
+    endpoint_url = f"{MANAPOOL_API_BASE_URL}{MANAPOOL_CARD_INFO_ENDPOINT}"
+    headers = build_manapool_headers(manapool_api_key, manapool_email)
+    response_payload = request_json(endpoint_url, headers=headers, payload={"card_names": card_names})
+    cards = response_payload.get("cards", []) if isinstance(response_payload, dict) else []
+
     cards_by_name: dict[str, list[dict[str, Any]]] = {}
-    auth_warning: str | None = None
-
-    for start in range(0, len(card_names), MANAPOOL_BATCH_SIZE):
-        batch = card_names[start : start + MANAPOOL_BATCH_SIZE]
-        payload = {"card_names": batch}
-        last_error: Exception | None = None
-        response_payload: Any = None
-
-        for headers in auth_variants:
-            try:
-                response_payload = request_json(endpoint_url, method=method, headers=headers, payload=payload)
-                auth_warning = None
-                break
-            except Exception as exc:
-                last_error = exc
-                if "401" not in str(exc) and "403" not in str(exc):
-                    break
-
-        if response_payload is None:
-            raise ValueError(str(last_error) if last_error else "Mana Pool API request failed.")
-
-        cards = response_payload.get("cards", []) if isinstance(response_payload, dict) else []
-        for card in cards:
-            if not isinstance(card, dict):
-                continue
-            normalized_name = normalize_header(card.get("name", ""))
-            if normalized_name:
-                cards_by_name.setdefault(normalized_name, []).append(card)
-
-    return cards_by_name, auth_warning
+    for card in cards:
+        if not isinstance(card, dict):
+            continue
+        normalized_name = normalize_header(card.get("name", ""))
+        if normalized_name:
+            cards_by_name.setdefault(normalized_name, []).append(card)
+    return cards_by_name
 
 
 def load_manapool_price_lookup(
@@ -543,7 +435,10 @@ def load_manapool_price_lookup(
 
     unique_names = sorted({product_name for product_name, _, _ in unique_keys})
     try:
-        cards_by_name, auth_warning = fetch_manapool_cards_by_names(unique_names, manapool_api_key, manapool_email)
+        cards_by_name = {}
+        for start in range(0, len(unique_names), MANAPOOL_BATCH_SIZE):
+            batch = unique_names[start : start + MANAPOOL_BATCH_SIZE]
+            cards_by_name.update(fetch_manapool_cards_by_names(batch, manapool_api_key, manapool_email))
     except Exception as exc:
         return {}, {}, f"Mana Pool API lookup was unavailable, so TCG fallback pricing was used instead. Details: {exc}"
 
@@ -569,9 +464,6 @@ def load_manapool_price_lookup(
     warnings: list[str] = []
     if misses:
         warnings.append(f"Mana Pool API lookup matched {len(price_lookup)} row key(s). {misses} row key(s) fell back to TCG pricing.")
-    if auth_warning:
-        warnings.append(auth_warning)
-
     return price_lookup, source_lookup, "\n\n".join(warnings) if warnings else None
 
 
