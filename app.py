@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import pickle
 from datetime import datetime
-from pathlib import Path
 
 import streamlit as st
 
@@ -15,12 +14,6 @@ st.set_page_config(
     page_title="Card Marketplace Listing Optimizer",
     layout="wide",
 )
-
-
-DIRECT_FEE_CANDIDATE_PATHS = [
-    Path(__file__).parent / "DIRECT vs PWE CALC.xlsx",
-    Path(__file__).parent / "assets" / "DIRECT vs PWE CALC.xlsx",
-]
 
 
 def get_configured_password() -> str | None:
@@ -62,8 +55,6 @@ def build_settings() -> OptimizerSettings:
     envelope_cost = st.sidebar.number_input("Envelope cost ($)", min_value=0.0, value=0.03, step=0.01, format="%.2f")
     team_bag_cost = st.sidebar.number_input("Team bag cost ($)", min_value=0.0, value=0.03, step=0.01, format="%.2f")
     max_direct_bump_percent = st.sidebar.number_input("Maximum Direct bump percentage (%)", min_value=0.0, value=20.0, step=1.0, format="%.1f")
-    direct_cliff_start = st.sidebar.number_input("Direct low-price cliff start ($)", min_value=0.01, value=3.00, step=0.01, format="%.2f")
-    direct_cliff_end = st.sidebar.number_input("Direct low-price cliff end ($)", min_value=0.01, value=3.40, step=0.01, format="%.2f")
     tracked_shipping_threshold = st.sidebar.number_input(
         "Manapool free tracked shipping threshold ($)",
         min_value=0.0,
@@ -84,8 +75,6 @@ def build_settings() -> OptimizerSettings:
         envelope_cost=envelope_cost,
         team_bag_cost=team_bag_cost,
         max_direct_bump_pct=max_direct_bump_percent / 100,
-        direct_cliff_start=direct_cliff_start,
-        direct_cliff_end=direct_cliff_end,
         tracked_shipping_threshold=tracked_shipping_threshold,
         tracked_shipping_cost=tracked_shipping_cost,
     )
@@ -106,13 +95,6 @@ def render_summary(result) -> None:
     metric_eight.metric("Skipped/Error Rows", summary["skipped_error_rows"])
 
     st.dataframe(result.analysis_df, use_container_width=True, hide_index=True)
-
-
-def load_builtin_direct_fee_file() -> tuple[bytes | None, str | None]:
-    for candidate_path in DIRECT_FEE_CANDIDATE_PATHS:
-        if candidate_path.exists():
-            return candidate_path.read_bytes(), candidate_path.name
-    return None, None
 
 
 def render_result(result, workbook_bytes: bytes, timestamp: str) -> None:
@@ -219,14 +201,10 @@ def main() -> None:
 
     st.title("Card Marketplace Listing Optimizer")
     st.caption("Compare TCGPlayer Direct vs Manapool and generate optimized listing sheets.")
+    st.info("TCGPlayer Direct fees are now built into the app: under $2.50 the net is 50% of item value, and at $2.50 or higher the fee model is $1.12 + 8.95% + 2.5%.")
 
     st.markdown('<div class="upload-panel">', unsafe_allow_html=True)
     tcgplayer_file = st.file_uploader("Upload TCGPlayer CSV export", type=["csv"])
-    built_in_fee_bytes, built_in_fee_name = load_builtin_direct_fee_file()
-    if built_in_fee_bytes:
-        st.success(f"Built-in Direct fee table loaded: `{built_in_fee_name}`")
-    else:
-        st.info("Built-in Direct fee table not added yet. Add `DIRECT vs PWE CALC.xlsx` to the repo root or `assets/` and the app will use it automatically.")
     generate_clicked = st.button("Generate Listing Sheets", type="primary", use_container_width=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -235,15 +213,9 @@ def main() -> None:
             st.error("Please upload the TCGPlayer CSV export.")
             return
 
-        if not built_in_fee_bytes or not built_in_fee_name:
-            st.error("The built-in Direct fee table has not been added yet. Add `DIRECT vs PWE CALC.xlsx` to the repo root or `assets/` and the app will use it automatically.")
-            return
-
         try:
             result = process_files(
                 tcgplayer_bytes=tcgplayer_file.getvalue(),
-                direct_fee_bytes=built_in_fee_bytes,
-                direct_fee_filename=built_in_fee_name,
                 settings=settings,
             )
             workbook_bytes = build_workbook(result)
