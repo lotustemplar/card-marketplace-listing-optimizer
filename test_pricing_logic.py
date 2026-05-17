@@ -93,12 +93,12 @@ def test_lookup_direct_net_uses_new_formula():
     assert lookup_direct_net(4.00) == 2.42
 
 
-def test_process_files_assigns_rows_and_records_errors():
+def test_process_files_assigns_rows_and_records_errors_without_api_credentials():
     result = process_files(
         tcgplayer_bytes=build_tcg_csv(),
-        direct_fee_bytes=None,
-        direct_fee_filename=None,
         settings=OptimizerSettings(),
+        manapool_api_key=None,
+        manapool_email=None,
     )
 
     assert len(result.manapool_preview_df) == 1
@@ -109,34 +109,26 @@ def test_process_files_assigns_rows_and_records_errors():
     assert result.direct_preview_df.iloc[0]["Direct Listing Price"] == 5.00
 
 
-def test_cliff_rule_bumps_above_direct_cliff():
-    tcg_dataframe = pd.DataFrame(
+def test_missing_required_columns_go_to_errors_sheet():
+    dataframe = pd.DataFrame(
         [
             {
-                "TCGplayer Id": "9",
+                "TCGplayer Id": "1",
                 "Product Line": "Magic",
-                "Set Name": "Set Z",
-                "Product Name": "Cliff Card",
-                "Number": "009",
-                "Rarity": "Rare",
-                "Condition": "Near Mint",
-                "TCG Market Price": "2.60",
-                "TCG Direct Low": "2.60",
-                "TCG Low Price": "1.85",
-                "TCG Marketplace Price": "",
-                "Total Quantity": "1",
-                "Add to Quantity": "",
+                "Set Name": "Set A",
+                "Product Name": "Alpha Card",
+                "TCG Market Price": "5.00",
             }
         ]
     )
     buffer = BytesIO()
-    tcg_dataframe.to_csv(buffer, index=False)
+    dataframe.to_csv(buffer, index=False)
+
     result = process_files(
         tcgplayer_bytes=buffer.getvalue(),
-        direct_fee_bytes=None,
-        direct_fee_filename=None,
         settings=OptimizerSettings(),
     )
 
-    assert result.manapool_preview_df.iloc[0]["Required Direct Price"] == 3.41
-    assert "cliff" in result.manapool_preview_df.iloc[0]["Reason"].lower()
+    assert result.missing_columns
+    assert not result.errors_df.empty
+    assert "Required CSV column missing" in result.errors_df.iloc[0]["Error reason"]
