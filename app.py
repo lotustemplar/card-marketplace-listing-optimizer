@@ -232,6 +232,18 @@ def main() -> None:
     else:
         st.info("Mana Pool API key not found, so Manapool pricing will fall back to TCG-based pricing.")
 
+    with st.expander("Mana Pool Credential Diagnostics"):
+        diagnostics_df = pd.DataFrame(
+            [
+                {"Check": "Mana Pool email loaded", "Status": "Yes" if bool(manapool_email) else "No"},
+                {"Check": "Mana Pool email looks like an email", "Status": "Yes" if manapool_email and "@" in manapool_email else "No"},
+                {"Check": "Mana Pool API token loaded", "Status": "Yes" if bool(manapool_api_key) else "No"},
+                {"Check": "Mana Pool API token has visible length", "Status": "Yes" if manapool_api_key and len(manapool_api_key.strip()) > 5 else "No"},
+            ]
+        )
+        st.dataframe(diagnostics_df, use_container_width=True, hide_index=True)
+        st.caption("This panel only shows yes/no checks. It does not reveal your email or API token.")
+
     st.markdown('<div class="upload-panel">', unsafe_allow_html=True)
     tcgplayer_file = st.file_uploader("Upload TCGPlayer CSV export", type=["csv"])
     generate_clicked = st.button("Generate Listing Sheets", type="primary", use_container_width=True)
