@@ -5,10 +5,11 @@ A Streamlit web app for comparing TCGPlayer Direct versus Manapool listing outco
 ## What the app does
 
 - Uploads a TCGPlayer CSV export.
+- Pulls live Mana Pool card prices from the official Mana Pool API.
 - Calculates Manapool net using editable fees and shipping inputs.
 - Uses the built-in TCGPlayer Direct fee formula for Direct net returns.
 - Finds the lowest Direct price that can meet or beat Manapool net.
-- Applies the Direct bump cap and the $3.00-$3.40 pricing cliff rule.
+- Applies the Direct bump cap.
 - Produces a new workbook with:
   - `Manapool Sheet`
   - `TCGPlayer Direct Sheet`
@@ -30,10 +31,19 @@ That means for cards at or above `$2.50`:
 
 - `Direct Net = Listing Price - (1.12 + Listing Price x 0.0895 + Listing Price x 0.025)`
 
+## Mana Pool pricing source
+
+The app uses the official Mana Pool API as its primary Manapool price source.
+
+- It searches Mana Pool by card name in batches.
+- It matches returned cards by `Product Name`, `Set Name`, and `Number` when available.
+- It uses `from_price_cents` from the API response as the Mana Pool comparison price.
+- If Mana Pool does not return a usable match for a row, the app falls back to TCG pricing for that row.
+
 ## Project files
 
 - `app.py`: Streamlit UI, password gate, uploads, dashboard, previews, and download flow.
-- `pricing_logic.py`: CSV parsing, pricing calculations, sheet assignment logic, analysis summary, and upload-ready CSV shaping.
+- `pricing_logic.py`: CSV parsing, Mana Pool API lookup, pricing calculations, sheet assignment logic, analysis summary, and upload-ready CSV shaping.
 - `workbook_writer.py`: Excel workbook generation and formatting.
 - `test_pricing_logic.py`: Small automated tests for the pricing engine.
 - `.streamlit/config.toml`: Streamlit app configuration.
@@ -61,6 +71,17 @@ Optional fields that are used when present:
 - `Number`
 - `Rarity`
 - `Condition`
+
+## Mana Pool API secrets
+
+For live Mana Pool pricing in Streamlit Community Cloud, add these secrets:
+
+```toml
+MANAPOOL_EMAIL="your-manapool-email@example.com"
+MANAPOOL_API_KEY="your-manapool-access-token"
+```
+
+If those secrets are not available or the API does not return a usable match, the app will continue with TCG fallback pricing instead of crashing.
 
 ## Local run
 
@@ -110,7 +131,7 @@ The tests cover:
 - Required Direct Price search
 - Direct bump % calculation
 - Sheet assignment using the bump rule
-- The $3.00-$3.40 Direct cliff rule
+- Missing required columns going to the Errors sheet
 - Missing data rows going to the Errors sheet
 
 ## Streamlit Community Cloud deployment
@@ -118,8 +139,9 @@ The tests cover:
 1. Push this project to a GitHub repository.
 2. In Streamlit Community Cloud, create a new app from that repo.
 3. Set the main file path to `app.py`.
-4. Optionally add `APP_PASSWORD` to Streamlit secrets.
-5. Deploy.
+4. Add `MANAPOOL_EMAIL` and `MANAPOOL_API_KEY` to Streamlit secrets for live Mana Pool pricing.
+5. Optionally add `APP_PASSWORD` to Streamlit secrets.
+6. Deploy.
 
 ## Docker deployment
 
@@ -135,10 +157,14 @@ docker build -t card-marketplace-listing-optimizer .
 docker run --rm -p 8501:8501 card-marketplace-listing-optimizer
 ```
 
-### Run with password protection
+### Run with secrets
 
 ```bash
-docker run --rm -p 8501:8501 -e APP_PASSWORD=your-password card-marketplace-listing-optimizer
+docker run --rm -p 8501:8501 \
+  -e MANAPOOL_EMAIL=your-manapool-email@example.com \
+  -e MANAPOOL_API_KEY=your-manapool-access-token \
+  -e APP_PASSWORD=your-password \
+  card-marketplace-listing-optimizer
 ```
 
 The app will be available at [http://localhost:8501](http://localhost:8501).
@@ -154,7 +180,7 @@ You can deploy this project on Render either as a Docker service or a Python web
 3. Choose the repository.
 4. Select Docker as the environment.
 5. Render will build from the included `Dockerfile`.
-6. Optionally set the `APP_PASSWORD` environment variable.
+6. Optionally set the `APP_PASSWORD`, `MANAPOOL_EMAIL`, and `MANAPOOL_API_KEY` environment variables.
 
 ### Option 2: Python web service
 
@@ -198,14 +224,12 @@ The generated workbook includes:
 - Alphabetical sorting by `Product Name`
 - Highlighting for Manapool minimum-price rows
 - Highlighting for bump-limit exceptions
-- Highlighting for Direct cliff-affected rows
 
 ## Pricing notes
 
-- Manapool price defaults to `max(TCG Low Price, 0.25)`, or `TCG Market Price` when `TCG Low Price` is blank.
+- Manapool price uses the Mana Pool API price first, then falls back to `TCG Low Price`, or `TCG Market Price` when `TCG Low Price` is blank.
 - Direct base price defaults to `max(TCG Market Price, TCG Direct Low)`.
-- Direct net now uses the built-in fee formula instead of a fee-table workbook.
+- Direct net uses the built-in fee formula instead of a fee-table workbook.
 - The app searches for the lowest Direct listing price whose Direct net meets or beats Manapool net.
 - If the required Direct bump exceeds the allowed maximum, the card is assigned to Manapool.
-- If the initial Direct target falls inside the low-price cliff range, the app tries the pre-cliff price first, then the next price above the cliff.
 - Separate upload-ready CSV downloads are available for Manapool and TCGPlayer Direct.
