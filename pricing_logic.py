@@ -5,6 +5,7 @@ from html import unescape
 from io import BytesIO
 import json
 import re
+import time
 import unicodedata
 from typing import Any
 from urllib import error, parse, request
@@ -109,9 +110,11 @@ SETTING_LABELS = {
     "tracked_shipping_cost": "Tracked shipping cost",
 }
 
-USER_AGENT = "CardMarketplaceListingOptimizer/0.2 (+https://github.com/lotustemplar/card-marketplace-listing-optimizer)"
+USER_AGENT = "CardMarketplaceListingOptimizer/0.3 (+https://github.com/lotustemplar/card-marketplace-listing-optimizer)"
 SCRYFALL_SEARCH_URL = "https://api.scryfall.com/cards/search"
 MANAPOOL_CARD_BASE_URL = "https://manapool.com/card"
+SCRYFALL_REQUEST_INTERVAL_SECONDS = 0.12
+_SCRYFALL_LAST_REQUEST_AT = 0.0
 
 
 @dataclass
@@ -350,7 +353,18 @@ def sort_preview(df: pd.DataFrame, display_columns: list[str]) -> pd.DataFrame:
     return sorted_df[display_columns]
 
 
-def fetch_json(url: str) -> dict[str, Any]:
+def throttle_scryfall_request() -> None:
+    global _SCRYFALL_LAST_REQUEST_AT
+    now = time.monotonic()
+    wait_for = SCRYFALL_REQUEST_INTERVAL_SECONDS - (now - _SCRYFALL_LAST_REQUEST_AT)
+    if wait_for > 0:
+        time.sleep(wait_for)
+    _SCRYFALL_LAST_REQUEST_AT = time.monotonic()
+
+
+def fetch_json(url: str, *, throttle_scryfall: bool = False) -> dict[str, Any]:
+    if throttle_scryfall:
+        throttle_scryfall_request()
     req = request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
     try:
         with request.urlopen(req, timeout=20) as response:
@@ -378,17 +392,29 @@ def fetch_text(url: str) -> str:
         raise ValueError(f"Request failed: {exc.reason}") from exc
 
 
-def search_scryfall_cards(query: str) -> list[dict[str, Any]]:
-    params = {
-        "q": query,
-        "unique": "prints",
-        "include_extras": "true",
-        "order": "released",
-        "dir": "desc",
-    }
-    url = f"{SCRYFALL_SEARCH_URL}?{parse.urlencode(params)}"
-    payload = fetch_json(url)
-    return payload.get("data", []) if isinstance(payload, dict) else []
+def search_scryfall_cards(product_name: str, search_cache: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    cache_key = normalize_header(product_name)
+    if cache_key in search_cache:
+        return search_cache[cache_key]
+
+    queries = [f'!"{product_name}"', product_name]
+    results: list[dict[str, Any]] = []
+    for query in queries:
+        params = {
+            "q": query,
+            "unique": "prints",
+            "include_extras": "true",
+            "order": "released",
+            "dir": "desc",
+        }
+        url = f"{SCRYFALL_SEARCH_URL}?{parse.urlencode(params)}"
+        payload = fetch_json(url, throttle_scryfall=True)
+        maybe_results = payload.get("data", []) if isinstance(payload, dict) else []
+        if maybe_results:
+            results = maybe_results
+            break
+    search_cache[cache_key] = results
+    return results
 
 
 def choose_scryfall_match(cards: list[dict[str, Any]], product_name: str, set_name: str, card_number: str) -> dict[str, Any] | None:
@@ -415,23 +441,13 @@ def choose_scryfall_match(cards: list[dict[str, Any]], product_name: str, set_na
     return best
 
 
-def resolve_manapool_card_page(product_name: str, set_name: str, card_number: str) -> str | None:
-    queries = []
-    if card_number:
-        queries.append(f'!"{product_name}" number:{card_number}')
-    queries.append(f'!"{product_name}"')
-    queries.append(product_name)
-
-    seen_card_ids: set[str] = set()
-    candidates: list[dict[str, Any]] = []
-    for query in queries:
-        for card in search_scryfall_cards(query):
-            card_id = str(card.get("id", ""))
-            if not card_id or card_id in seen_card_ids:
-                continue
-            seen_card_ids.add(card_id)
-            candidates.append(card)
-
+def resolve_manapool_card_page(
+    product_name: str,
+    set_name: str,
+    card_number: str,
+    search_cache: dict[str, list[dict[str, Any]]],
+) -> str | None:
+    candidates = search_scryfall_cards(product_name, search_cache)
     match = choose_scryfall_match(candidates, product_name, set_name, card_number)
     if not match:
         return None
@@ -497,10 +513,11 @@ def load_manapool_price_lookup(
     price_lookup: dict[tuple[str, str, str], float] = {}
     source_lookup: dict[tuple[str, str, str], str] = {}
     misses = 0
+    search_cache: dict[str, list[dict[str, Any]]] = {}
 
     try:
         for product_name, set_name, card_number in unique_keys:
-            page_url = resolve_manapool_card_page(product_name, set_name, card_number)
+            page_url = resolve_manapool_card_page(product_name, set_name, card_number, search_cache)
             if not page_url:
                 misses += 1
                 continue
