@@ -4,6 +4,7 @@ import os
 import pickle
 from datetime import datetime
 
+import pandas as pd
 import streamlit as st
 
 from pricing_logic import OptimizerSettings, process_files
@@ -80,6 +81,11 @@ def build_settings() -> OptimizerSettings:
     )
 
 
+def dataframe_to_plain_csv_bytes(dataframe: pd.DataFrame) -> bytes:
+    csv_text = dataframe.to_csv(index=False, lineterminator="\r\n")
+    return csv_text.encode("cp1252", errors="replace")
+
+
 def render_summary(result) -> None:
     summary = result.summary
     metric_one, metric_two, metric_three, metric_four = st.columns(4)
@@ -121,7 +127,7 @@ def render_result(result, workbook_bytes: bytes, timestamp: str) -> None:
     with download_two:
         st.download_button(
             "Download Manapool CSV",
-            data=result.manapool_csv_df.to_csv(index=False).encode("utf-8-sig"),
+            data=dataframe_to_plain_csv_bytes(result.manapool_csv_df),
             file_name=f"manapool_upload_{timestamp}.csv",
             mime="text/csv",
             use_container_width=True,
@@ -130,7 +136,7 @@ def render_result(result, workbook_bytes: bytes, timestamp: str) -> None:
     with download_three:
         st.download_button(
             "Download TCGPlayer Direct CSV",
-            data=result.direct_csv_df.to_csv(index=False).encode("utf-8-sig"),
+            data=dataframe_to_plain_csv_bytes(result.direct_csv_df),
             file_name=f"tcgplayer_direct_upload_{timestamp}.csv",
             mime="text/csv",
             use_container_width=True,
