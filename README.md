@@ -5,9 +5,8 @@ A Streamlit web app for comparing TCGPlayer Direct versus Manapool listing outco
 ## What the app does
 
 - Uploads a TCGPlayer CSV export.
-- Uploads a TCGPlayer Direct fee structure file in CSV or XLSX format.
 - Calculates Manapool net using editable fees and shipping inputs.
-- Uses the Direct fee table as the source of truth for Direct net returns.
+- Uses the built-in TCGPlayer Direct fee formula for Direct net returns.
 - Finds the lowest Direct price that can meet or beat Manapool net.
 - Applies the Direct bump cap and the $3.00-$3.40 pricing cliff rule.
 - Produces a new workbook with:
@@ -15,19 +14,34 @@ A Streamlit web app for comparing TCGPlayer Direct versus Manapool listing outco
   - `TCGPlayer Direct Sheet`
   - `Analysis`
   - `Errors`
+- Produces separate upload-ready CSV downloads for:
+  - Manapool
+  - TCGPlayer Direct
+
+## Current TCGPlayer Direct fee formula
+
+- Less than `$2.50`: Direct net is `50%` of item value
+- Greater than or equal to `$2.50`: Direct fees are:
+  - `$1.12`
+  - `8.95%` marketplace commission
+  - `2.5%` credit card processing fee
+
+That means for cards at or above `$2.50`:
+
+- `Direct Net = Listing Price - (1.12 + Listing Price x 0.0895 + Listing Price x 0.025)`
 
 ## Project files
 
-- `app.py`: Streamlit UI, password gate, uploads, dashboard, previews, download flow.
-- `pricing_logic.py`: CSV parsing, fee table handling, pricing calculations, sheet assignment logic, analysis summary.
+- `app.py`: Streamlit UI, password gate, uploads, dashboard, previews, and download flow.
+- `pricing_logic.py`: CSV parsing, pricing calculations, sheet assignment logic, analysis summary, and upload-ready CSV shaping.
 - `workbook_writer.py`: Excel workbook generation and formatting.
 - `test_pricing_logic.py`: Small automated tests for the pricing engine.
 - `.streamlit/config.toml`: Streamlit app configuration.
 - `Dockerfile`: Container deployment support.
 
-## Required input files
+## Required input file
 
-### 1. TCGPlayer CSV export
+### TCGPlayer CSV export
 
 The app detects fields by header name instead of column letter. It expects the CSV to include headers matching these fields:
 
@@ -42,18 +56,11 @@ The app detects fields by header name instead of column letter. It expects the C
 
 Optional fields that are used when present:
 
+- `TCG Marketplace Price`
 - `Add to Quantity`
 - `Number`
 - `Rarity`
 - `Condition`
-
-### 2. TCGPlayer Direct fee structure
-
-- Can be `.csv` or `.xlsx`
-- Column A must contain Direct listing price
-- Column J must contain Direct net return after fees
-
-The fee table is the source of truth for Direct net lookups.
 
 ## Local run
 
@@ -98,11 +105,11 @@ pytest
 The tests cover:
 
 - Manapool net calculation
-- Manapool $0.25 minimum enforcement
-- Direct fee lookup using the closest fee-table price less than or equal to the proposed listing price
+- New Direct net calculation below `$2.50`
+- New Direct net calculation at or above `$2.50`
 - Required Direct Price search
 - Direct bump % calculation
-- Sheet assignment using the 20% bump rule
+- Sheet assignment using the bump rule
 - The $3.00-$3.40 Direct cliff rule
 - Missing data rows going to the Errors sheet
 
@@ -176,6 +183,7 @@ The included Dockerfile also works well for Railway, Fly.io, and similar platfor
 - Original uploads are never overwritten or mutated.
 - Invalid rows are added to the `Errors` sheet instead of crashing the app.
 - Valid rows continue processing even when some rows fail.
+- Results stay on-screen after generation, including after download clicks.
 
 ## Workbook formatting
 
@@ -196,7 +204,8 @@ The generated workbook includes:
 
 - Manapool price defaults to `max(TCG Low Price, 0.25)`, or `TCG Market Price` when `TCG Low Price` is blank.
 - Direct base price defaults to `max(TCG Market Price, TCG Direct Low)`.
-- Direct net uses the nearest fee-table listing price less than or equal to the proposed Direct price.
-- The app searches the fee table for the lowest Direct listing price whose Direct net meets or beats Manapool net.
+- Direct net now uses the built-in fee formula instead of a fee-table workbook.
+- The app searches for the lowest Direct listing price whose Direct net meets or beats Manapool net.
 - If the required Direct bump exceeds the allowed maximum, the card is assigned to Manapool.
 - If the initial Direct target falls inside the low-price cliff range, the app tries the pre-cliff price first, then the next price above the cliff.
+- Separate upload-ready CSV downloads are available for Manapool and TCGPlayer Direct.
