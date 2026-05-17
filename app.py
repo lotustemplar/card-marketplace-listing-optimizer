@@ -11,7 +11,7 @@ from pricing_logic import OptimizerSettings, process_files
 from workbook_writer import build_workbook
 
 
-APP_VERSION = "0.5"
+APP_VERSION = "0.6"
 
 st.set_page_config(
     page_title="Card Marketplace Listing Optimizer",
@@ -226,13 +226,13 @@ def main() -> None:
     st.title("Card Marketplace Listing Optimizer")
     st.caption(f"Compare TCGPlayer Direct vs Manapool and generate optimized listing sheets. App version {APP_VERSION}.")
     st.info("TCGPlayer Direct fees are built into the app: under $2.50 the net is 50% of item value, and at $2.50 or higher the fee model is $1.12 + 8.95% + 2.5%.")
-    st.success("Mana Pool pricing now uses the official Mana Pool API only. When a matching card, set, and number are found, the app compares that API price against TCGPlayer Direct pricing and falls back to TCG pricing only when the API does not return a usable match.")
+    st.success("Mana Pool pricing now uses the official Mana Pool API /card_info endpoint with Mana Pool's documented email and access-token headers. If a card cannot be matched cleanly, the app falls back to TCG pricing for that row.")
 
     with st.expander("Mana Pool Credential Diagnostics"):
         diagnostics_df = pd.DataFrame(
             [
                 {"Check": "App version", "Status": APP_VERSION},
-                {"Check": "Mana Pool lookup mode", "Status": "Official API"},
+                {"Check": "Mana Pool lookup mode", "Status": "Official API /card_info"},
                 {"Check": "Mana Pool email loaded", "Status": "Yes" if bool(manapool_email) else "No"},
                 {"Check": "Mana Pool email looks like an email", "Status": "Yes" if bool(manapool_email and "@" in manapool_email) else "No"},
                 {"Check": "Mana Pool API token loaded", "Status": "Yes" if bool(manapool_api_key) else "No"},
