@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from io import BytesIO
+import base64
 import json
 from typing import Any
 from urllib import error, parse, request
@@ -379,7 +380,7 @@ def find_json_schema(content_block: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def discover_manapool_card_lookup(api_key: str) -> tuple[str, str, dict[str, str], dict[str, str]]:
+def discover_manapool_card_lookup(api_key: str, manapool_email: str | None = None) -> tuple[str, str, dict[str, str], dict[str, str]]:
     spec = fetch_json(MANAPOOL_OPENAPI_URL)
     servers = spec.get("servers") or [{"url": MANAPOOL_DEFAULT_BASE_URL}]
     base_url = servers[0].get("url", MANAPOOL_DEFAULT_BASE_URL)
@@ -412,7 +413,7 @@ def discover_manapool_card_lookup(api_key: str) -> tuple[str, str, dict[str, str
             if not matched_response_schema:
                 continue
 
-            headers, query_auth = build_auth_headers(spec, operation, security_schemes, api_key)
+            headers, query_auth = build_auth_headers(spec, operation, security_schemes, api_key, manapool_email)
             return base_url, path, headers, query_auth
 
     raise ValueError("Unable to locate Mana Pool card lookup endpoint in the OpenAPI spec.")
@@ -423,10 +424,16 @@ def build_auth_headers(
     operation: dict[str, Any],
     security_schemes: dict[str, Any],
     api_key: str,
+    manapool_email: str | None = None,
 ) -> tuple[dict[str, str], dict[str, str]]:
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
     query_params: dict[str, str] = {}
     security_requirements = operation.get("security", spec.get("security", []))
+
+    if manapool_email:
+        credentials = f"{manapool_email}:{api_key}".encode("utf-8")
+        headers["Authorization"] = f"Basic {base64.b64encode(credentials).decode('ascii')}"
+        return headers, query_params
 
     for security_requirement in security_requirements:
         for scheme_name in security_requirement.keys():
@@ -498,6 +505,7 @@ def load_manapool_price_lookup(
     tcg_df: pd.DataFrame,
     column_map: dict[str, str],
     manapool_api_key: str | None,
+    manapool_email: str | None = None,
 ) -> tuple[dict[tuple[str, str, str], float], dict[tuple[str, str, str], str], str | None]:
     if not manapool_api_key:
         return {}, {}, None
@@ -519,7 +527,7 @@ def load_manapool_price_lookup(
         return {}, {}, None
 
     try:
-        base_url, path, headers, query_auth = discover_manapool_card_lookup(manapool_api_key)
+        base_url, path, headers, query_auth = discover_manapool_card_lookup(manapool_api_key, manapool_email)
         endpoint_url = parse.urljoin(base_url.rstrip("/") + "/", path.lstrip("/"))
         cards_by_name: dict[str, list[dict[str, Any]]] = {}
 
@@ -606,6 +614,7 @@ def process_files(
     tcgplayer_bytes: bytes,
     settings: OptimizerSettings,
     manapool_api_key: str | None = None,
+    manapool_email: str | None = None,
 ) -> ProcessResult:
     tcg_df = load_tcgplayer_dataframe(tcgplayer_bytes)
 
@@ -659,6 +668,7 @@ def process_files(
         tcg_df,
         column_map,
         manapool_api_key,
+        manapool_email,
     )
 
     manapool_rows: list[dict[str, Any]] = []
