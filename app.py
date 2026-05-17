@@ -11,7 +11,7 @@ from pricing_logic import OptimizerSettings, process_files
 from workbook_writer import build_workbook
 
 
-APP_VERSION = "0.7"
+APP_VERSION = "0.8"
 
 st.set_page_config(
     page_title="Card Marketplace Listing Optimizer",
@@ -203,7 +203,7 @@ def render_manual_resolution_panel(
         return
 
     st.subheader("Resolve Mana Pool Matches")
-    st.caption("These rows had Mana Pool candidates by card name, but not a confident exact set and number match. Pick the right printing from the dropdown and re-run using your selections.")
+    st.caption("These rows had Mana Pool candidates by card name, but not a confident exact set and number match. Pick the right printing from the dropdown and re-run using your selections. The dropdown now includes broader in-stock variant data from Mana Pool's variant price export when available.")
 
     current_overrides = st.session_state.get("optimizer_match_overrides", {})
     with st.form("manapool_match_override_form"):
@@ -236,7 +236,7 @@ def render_manual_resolution_panel(
             match_overrides[item["row_key"]] = {
                 "price": selected_option["price"],
                 "label": selected_option["label"],
-                "reason": f"Mana Pool manual override: {selected_option['label']}",
+                "reason": selected_option.get("reason", f"Mana Pool manual override: {selected_option['label']}"),
             }
 
         source_bytes = st.session_state.get("optimizer_source_bytes")
@@ -310,13 +310,13 @@ def main() -> None:
     st.title("Card Marketplace Listing Optimizer")
     st.caption(f"Compare TCGPlayer Direct vs Manapool and generate optimized listing sheets. App version {APP_VERSION}.")
     st.info("TCGPlayer Direct fees are built into the app: under $2.50 the net is 50% of item value, and at $2.50 or higher the fee model is $1.12 + 8.95% + 2.5%.")
-    st.success("Mana Pool pricing now uses the official Mana Pool API /card_info endpoint. If a row cannot be matched cleanly, you can now manually choose the correct Mana Pool printing from API-returned candidates before re-running.")
+    st.success("Mana Pool pricing uses the official Mana Pool API /card_info endpoint for direct matches. Unresolved rows now also pull broader in-stock candidate printings from Mana Pool's /prices/variants export so cards like Assassin's Trophy can surface more useful manual options.")
 
     with st.expander("Mana Pool Credential Diagnostics"):
         diagnostics_df = pd.DataFrame(
             [
                 {"Check": "App version", "Status": APP_VERSION},
-                {"Check": "Mana Pool lookup mode", "Status": "Official API /card_info + manual overrides"},
+                {"Check": "Mana Pool lookup mode", "Status": "Official API /card_info + /prices/variants"},
                 {"Check": "Mana Pool email loaded", "Status": "Yes" if bool(manapool_email) else "No"},
                 {"Check": "Mana Pool email looks like an email", "Status": "Yes" if bool(manapool_email and "@" in manapool_email) else "No"},
                 {"Check": "Mana Pool API token loaded", "Status": "Yes" if bool(manapool_api_key) else "No"},
