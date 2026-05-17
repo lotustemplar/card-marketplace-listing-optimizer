@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from io import BytesIO
-from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -159,45 +158,6 @@ def load_tcgplayer_dataframe(file_bytes: bytes) -> pd.DataFrame:
     return df
 
 
-def load_direct_fee_table(file_bytes: bytes, filename: str) -> pd.DataFrame:
-    suffix = Path(filename).suffix.lower()
-    if suffix == ".csv":
-        encodings = ["utf-8-sig", "utf-8", "cp1252", "latin-1"]
-        last_error: Exception | None = None
-        fee_df = None
-        for encoding in encodings:
-            try:
-                fee_df = pd.read_csv(BytesIO(file_bytes), header=None, encoding=encoding)
-                break
-            except Exception as exc:
-                last_error = exc
-        if fee_df is None:
-            raise ValueError(f"Unable to read Direct fee CSV file: {last_error}") from last_error
-    elif suffix in {".xlsx", ".xlsm", ".xls"}:
-        fee_df = pd.read_excel(BytesIO(file_bytes), header=None, engine="openpyxl")
-    else:
-        raise ValueError("Direct fee structure must be a CSV or Excel file.")
-
-    if fee_df.shape[1] < 10:
-        raise ValueError("Direct fee structure must include at least 10 columns so Column A and Column J can be read.")
-
-    fee_table = pd.DataFrame(
-        {
-            "listing_price": pd.to_numeric(fee_df.iloc[:, 0], errors="coerce"),
-            "direct_net": pd.to_numeric(fee_df.iloc[:, 9], errors="coerce"),
-        }
-    ).dropna(subset=["listing_price", "direct_net"])
-
-    if fee_table.empty:
-        raise ValueError("No numeric Direct listing prices and net returns were found in Column A and Column J.")
-
-    fee_table = fee_table.sort_values("listing_price").drop_duplicates(subset=["listing_price"], keep="last")
-    fee_table["listing_price"] = fee_table["listing_price"].round(2)
-    fee_table["direct_net"] = fee_table["direct_net"].round(2)
-    fee_table = fee_table.reset_index(drop=True)
-    return fee_table
-
-
 def map_tcgplayer_columns(df: pd.DataFrame) -> tuple[dict[str, str], list[str]]:
     normalized_lookup = {normalize_header(column): column for column in df.columns}
     mapped: dict[str, str] = {}
@@ -256,27 +216,32 @@ def calculate_manapool_net(card_price: float, settings: OptimizerSettings) -> fl
     return round(net, 2)
 
 
-def lookup_direct_net(proposed_price: float | None, fee_table: pd.DataFrame) -> float | None:
+def calculate_direct_net(listing_price: float) -> float:
+    if listing_price < 2.50:
+        return round(listing_price * 0.50, 2)
+    fees = 1.12 + (listing_price * 0.0895) + (listing_price * 0.025)
+    return round(listing_price - fees, 2)
+
+
+def lookup_direct_net(proposed_price: float | None) -> float | None:
     if proposed_price is None:
         return None
-    eligible = fee_table.loc[fee_table["listing_price"] <= proposed_price]
-    if eligible.empty:
-        return None
-    return round(float(eligible.iloc[-1]["direct_net"]), 2)
+    return calculate_direct_net(round(proposed_price, 2))
 
 
-def find_required_direct_price(target_net: float, fee_table: pd.DataFrame) -> float | None:
-    matches = fee_table.loc[fee_table["direct_net"] >= target_net]
-    if matches.empty:
-        return None
-    return round(float(matches.iloc[0]["listing_price"]), 2)
+def find_required_direct_price(target_net: float) -> float | None:
+    if target_net <= 0:
+        return 0.01
+
+    for cents in range(1, 500001):
+        listing_price = cents / 100
+        if calculate_direct_net(listing_price) >= round(target_net, 2):
+            return round(listing_price, 2)
+    return None
 
 
-def find_next_direct_price_above(threshold: float, fee_table: pd.DataFrame) -> float | None:
-    matches = fee_table.loc[fee_table["listing_price"] > threshold]
-    if matches.empty:
-        return None
-    return round(float(matches.iloc[0]["listing_price"]), 2)
+def find_next_direct_price_above(threshold: float) -> float | None:
+    return round(threshold + 0.01, 2)
 
 
 def calculate_direct_bump_pct(base_price: float | None, required_price: float | None) -> float | None:
@@ -365,12 +330,11 @@ def build_analysis_dataframe(summary: dict[str, Any], settings: OptimizerSetting
 
 def process_files(
     tcgplayer_bytes: bytes,
-    direct_fee_bytes: bytes,
-    direct_fee_filename: str,
+    direct_fee_bytes: bytes | None,
+    direct_fee_filename: str | None,
     settings: OptimizerSettings,
 ) -> ProcessResult:
     tcg_df = load_tcgplayer_dataframe(tcgplayer_bytes)
-    fee_table = load_direct_fee_table(direct_fee_bytes, direct_fee_filename)
 
     column_map, missing_columns = map_tcgplayer_columns(tcg_df)
     source_columns = list(tcg_df.columns)
@@ -493,8 +457,8 @@ def process_files(
         else:
             base_direct_price = max(market_price, direct_low)
 
-        base_direct_net = lookup_direct_net(base_direct_price, fee_table)
-        required_direct_price = find_required_direct_price(manapool_net, fee_table)
+        base_direct_net = lookup_direct_net(base_direct_price)
+        required_direct_price = find_required_direct_price(manapool_net)
         if base_direct_price is not None and base_direct_net is not None and base_direct_net >= manapool_net:
             required_direct_price = round(base_direct_price, 2)
 
@@ -508,24 +472,24 @@ def process_files(
 
         direct_listing_price = required_direct_price
         display_required_direct_price = required_direct_price
-        direct_net = lookup_direct_net(direct_listing_price, fee_table) if direct_listing_price is not None else None
+        direct_net = lookup_direct_net(direct_listing_price) if direct_listing_price is not None else None
 
         if direct_listing_price is None or direct_net is None:
-            reason_parts.append("Required Direct Price not found in fee table")
+            reason_parts.append("Required Direct Price not found")
             destination = "manapool"
         else:
             if settings.direct_cliff_start <= direct_listing_price <= settings.direct_cliff_end:
                 cliff_affected = True
                 direct_cliff_affected_count += 1
                 pre_cliff_price = round(max(settings.direct_cliff_start - 0.01, 0.01), 2)
-                pre_cliff_net = lookup_direct_net(pre_cliff_price, fee_table)
+                pre_cliff_net = lookup_direct_net(pre_cliff_price)
                 if pre_cliff_net is not None and pre_cliff_net >= manapool_net:
                     direct_listing_price = pre_cliff_price
                     display_required_direct_price = pre_cliff_price
                     direct_net = pre_cliff_net
                     reason_parts.append("Adjusted to avoid Direct pricing cliff")
                 else:
-                    post_cliff_price = find_next_direct_price_above(settings.direct_cliff_end, fee_table)
+                    post_cliff_price = find_next_direct_price_above(settings.direct_cliff_end)
                     if post_cliff_price is None:
                         reason_parts.append("No valid Direct price above pricing cliff")
                         destination = "manapool"
@@ -534,7 +498,7 @@ def process_files(
                     else:
                         direct_listing_price = post_cliff_price
                         display_required_direct_price = post_cliff_price
-                        direct_net = lookup_direct_net(post_cliff_price, fee_table)
+                        direct_net = lookup_direct_net(post_cliff_price)
                         reason_parts.append("Bumped above Direct pricing cliff")
 
             if direct_listing_price is None or direct_net is None:
