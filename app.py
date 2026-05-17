@@ -7,11 +7,11 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
-from pricing_logic_bulk import OptimizerSettings, process_files
+from pricing_logic import OptimizerSettings, process_files
 from workbook_writer import build_workbook
 
 
-APP_VERSION = "0.4"
+APP_VERSION = "0.5"
 
 st.set_page_config(
     page_title="Card Marketplace Listing Optimizer",
@@ -116,7 +116,7 @@ def render_summary(result) -> None:
     metric_seven.metric("Combined Estimated Net", f"${summary['combined_estimated_net']:.2f}")
     metric_eight.metric("Skipped/Error Rows", summary["skipped_error_rows"])
 
-    st.dataframe(result.analysis_df, use_container_width=True, hide_index=True)
+    st.dataframe(result.analysis_df, width="stretch", hide_index=True)
 
 
 def render_result(result, workbook_bytes: bytes, timestamp: str) -> None:
@@ -138,7 +138,7 @@ def render_result(result, workbook_bytes: bytes, timestamp: str) -> None:
             data=workbook_bytes,
             file_name=filename,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
+            width="stretch",
         )
     with download_two:
         st.download_button(
@@ -146,7 +146,7 @@ def render_result(result, workbook_bytes: bytes, timestamp: str) -> None:
             data=dataframe_to_plain_csv_bytes(result.manapool_csv_df),
             file_name=f"manapool_upload_{timestamp}.csv",
             mime="text/csv",
-            use_container_width=True,
+            width="stretch",
             disabled=result.manapool_csv_df.empty,
         )
     with download_three:
@@ -155,19 +155,19 @@ def render_result(result, workbook_bytes: bytes, timestamp: str) -> None:
             data=dataframe_to_plain_csv_bytes(result.direct_csv_df),
             file_name=f"tcgplayer_direct_upload_{timestamp}.csv",
             mime="text/csv",
-            use_container_width=True,
+            width="stretch",
             disabled=result.direct_csv_df.empty,
         )
 
     st.subheader("Manapool Sheet Preview")
-    st.dataframe(result.manapool_preview_df, use_container_width=True, hide_index=True)
+    st.dataframe(result.manapool_preview_df, width="stretch", hide_index=True)
 
     st.subheader("TCGPlayer Direct Sheet Preview")
-    st.dataframe(result.direct_preview_df, use_container_width=True, hide_index=True)
+    st.dataframe(result.direct_preview_df, width="stretch", hide_index=True)
 
     if not result.errors_df.empty:
         st.subheader("Errors Sheet Preview")
-        st.dataframe(result.errors_df, use_container_width=True, hide_index=True)
+        st.dataframe(result.errors_df, width="stretch", hide_index=True)
 
 
 def main() -> None:
@@ -225,26 +225,26 @@ def main() -> None:
 
     st.title("Card Marketplace Listing Optimizer")
     st.caption(f"Compare TCGPlayer Direct vs Manapool and generate optimized listing sheets. App version {APP_VERSION}.")
-    st.info("TCGPlayer Direct fees are now built into the app: under $2.50 the net is 50% of item value, and at $2.50 or higher the fee model is $1.12 + 8.95% + 2.5%.")
-    st.success("Mana Pool pricing now uses cached Scryfall bulk metadata to resolve exact card pages before reading the live public Mana Pool floor, with TCG fallback pricing for misses.")
+    st.info("TCGPlayer Direct fees are built into the app: under $2.50 the net is 50% of item value, and at $2.50 or higher the fee model is $1.12 + 8.95% + 2.5%.")
+    st.success("Mana Pool pricing now uses the official Mana Pool API only. When a matching card, set, and number are found, the app compares that API price against TCGPlayer Direct pricing and falls back to TCG pricing only when the API does not return a usable match.")
 
     with st.expander("Mana Pool Credential Diagnostics"):
         diagnostics_df = pd.DataFrame(
             [
                 {"Check": "App version", "Status": APP_VERSION},
-                {"Check": "Mana Pool lookup mode", "Status": "Public card pages"},
-                {"Check": "Card metadata source", "Status": "Cached Scryfall bulk data"},
+                {"Check": "Mana Pool lookup mode", "Status": "Official API"},
                 {"Check": "Mana Pool email loaded", "Status": "Yes" if bool(manapool_email) else "No"},
+                {"Check": "Mana Pool email looks like an email", "Status": "Yes" if bool(manapool_email and "@" in manapool_email) else "No"},
                 {"Check": "Mana Pool API token loaded", "Status": "Yes" if bool(manapool_api_key) else "No"},
-                {"Check": "Mana Pool API credentials currently required", "Status": "No"},
+                {"Check": "Mana Pool API token has visible length", "Status": "Yes" if bool(manapool_api_key and len(manapool_api_key.strip()) >= 8) else "No"},
             ]
         )
-        st.dataframe(diagnostics_df, use_container_width=True, hide_index=True)
-        st.caption("This panel shows safe diagnostic values only. App version increments by 0.1 on each live code push.")
+        st.dataframe(diagnostics_df, width="stretch", hide_index=True)
+        st.caption("This panel only shows safe yes/no checks and the current app version. It does not reveal your email or API token.")
 
     st.markdown('<div class="upload-panel">', unsafe_allow_html=True)
     tcgplayer_file = st.file_uploader("Upload TCGPlayer CSV export", type=["csv"])
-    generate_clicked = st.button("Generate Listing Sheets", type="primary", use_container_width=True)
+    generate_clicked = st.button("Generate Listing Sheets", type="primary", width="stretch")
     st.markdown("</div>", unsafe_allow_html=True)
 
     if generate_clicked:
