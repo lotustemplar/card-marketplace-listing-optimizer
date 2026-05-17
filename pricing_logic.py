@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from io import BytesIO
+import json
 from typing import Any
+from urllib import error, parse, request
 
 import pandas as pd
 
@@ -104,6 +106,9 @@ SETTING_LABELS = {
     "tracked_shipping_cost": "Tracked shipping cost",
 }
 
+MANAPOOL_OPENAPI_URL = "https://manapool.com/api/docs/v1/openapi.json"
+MANAPOOL_DEFAULT_BASE_URL = "https://manapool.com"
+
 
 @dataclass
 class OptimizerSettings:
@@ -142,6 +147,12 @@ class OptimizerSettings:
                 "Value": "< $2.50 = 50% of item value; >= $2.50 = $1.12 + 8.95% + 2.5%",
             }
         )
+        rows.append(
+            {
+                "Metric": "Mana Pool price source",
+                "Value": "Live Mana Pool API floor when available, otherwise TCG fallback pricing",
+            }
+        )
         return rows
 
 
@@ -173,6 +184,11 @@ def normalize_header(value: Any) -> str:
             compact.append(" ")
             last_space = True
     return "".join(compact).strip()
+
+
+def normalize_identifier(value: Any) -> str:
+    text = "" if value is None else str(value).strip().lower()
+    return "".join(char for char in text if char.isalnum())
 
 
 def parse_uploaded_csv(file_bytes: bytes) -> pd.DataFrame:
@@ -251,12 +267,6 @@ def calculate_manapool_net(card_price: float, settings: OptimizerSettings) -> fl
 
 
 def calculate_direct_net(listing_price: float) -> float:
-    """Apply the current TCGPlayer Direct fee model.
-
-    Under $2.50, Direct nets 50% of item value.
-    At $2.50 and above, fees are a flat $1.12 plus 8.95% marketplace commission
-    plus 2.5% credit-card processing.
-    """
     if listing_price < 2.50:
         return round(listing_price * 0.50, 2)
     fees = 1.12 + (listing_price * 0.0895) + (listing_price * 0.025)
@@ -327,6 +337,237 @@ def sort_preview(df: pd.DataFrame, display_columns: list[str]) -> pd.DataFrame:
     return sorted_df[display_columns]
 
 
+def resolve_json_ref(spec: dict[str, Any], ref: str) -> dict[str, Any]:
+    target: Any = spec
+    for part in ref.lstrip("#/").split("/"):
+        target = target[part]
+    if isinstance(target, dict):
+        return target
+    return {}
+
+
+def resolve_schema(spec: dict[str, Any], schema: dict[str, Any] | None) -> dict[str, Any]:
+    if not schema:
+        return {}
+    if "$ref" in schema:
+        return resolve_schema(spec, resolve_json_ref(spec, schema["$ref"]))
+    return schema
+
+
+def schema_has_top_level_property(spec: dict[str, Any], schema: dict[str, Any] | None, property_name: str) -> bool:
+    resolved = resolve_schema(spec, schema)
+    return property_name in resolved.get("properties", {})
+
+
+def response_has_cards_with_prices(spec: dict[str, Any], schema: dict[str, Any] | None) -> bool:
+    resolved = resolve_schema(spec, schema)
+    cards_property = resolve_schema(spec, resolved.get("properties", {}).get("cards"))
+    if not cards_property:
+        return False
+    items_schema = resolve_schema(spec, cards_property.get("items"))
+    return "from_price_cents" in items_schema.get("properties", {})
+
+
+def find_json_schema(content_block: dict[str, Any]) -> dict[str, Any] | None:
+    for mime_type in ["application/json", "application/*+json"]:
+        schema = content_block.get(mime_type, {}).get("schema")
+        if schema:
+            return schema
+    for payload in content_block.values():
+        if isinstance(payload, dict) and payload.get("schema"):
+            return payload["schema"]
+    return None
+
+
+def discover_manapool_card_lookup(api_key: str) -> tuple[str, str, dict[str, str], dict[str, str]]:
+    spec = fetch_json(MANAPOOL_OPENAPI_URL)
+    servers = spec.get("servers") or [{"url": MANAPOOL_DEFAULT_BASE_URL}]
+    base_url = servers[0].get("url", MANAPOOL_DEFAULT_BASE_URL)
+    paths = spec.get("paths", {})
+    security_schemes = spec.get("components", {}).get("securitySchemes", {})
+
+    for path, methods in paths.items():
+        if not isinstance(methods, dict):
+            continue
+        for method, operation in methods.items():
+            if method.lower() not in {"post", "get"} or not isinstance(operation, dict):
+                continue
+
+            request_schema = None
+            request_body = operation.get("requestBody")
+            if request_body:
+                request_schema = find_json_schema(resolve_schema(spec, request_body).get("content", {}))
+            if not schema_has_top_level_property(spec, request_schema, "card_names"):
+                continue
+
+            responses = operation.get("responses", {})
+            matched_response_schema = None
+            for status_code, response in responses.items():
+                if not str(status_code).startswith(("2", "default")):
+                    continue
+                response_schema = find_json_schema(resolve_schema(spec, response).get("content", {}))
+                if response_has_cards_with_prices(spec, response_schema):
+                    matched_response_schema = response_schema
+                    break
+            if not matched_response_schema:
+                continue
+
+            headers, query_auth = build_auth_headers(spec, operation, security_schemes, api_key)
+            return base_url, path, headers, query_auth
+
+    raise ValueError("Unable to locate Mana Pool card lookup endpoint in the OpenAPI spec.")
+
+
+def build_auth_headers(
+    spec: dict[str, Any],
+    operation: dict[str, Any],
+    security_schemes: dict[str, Any],
+    api_key: str,
+) -> tuple[dict[str, str], dict[str, str]]:
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    query_params: dict[str, str] = {}
+    security_requirements = operation.get("security", spec.get("security", []))
+
+    for security_requirement in security_requirements:
+        for scheme_name in security_requirement.keys():
+            scheme = security_schemes.get(scheme_name, {})
+            scheme_type = scheme.get("type")
+            if scheme_type == "http" and scheme.get("scheme", "").lower() == "bearer":
+                headers["Authorization"] = f"Bearer {api_key}"
+                return headers, query_params
+            if scheme_type == "apiKey":
+                location = scheme.get("in")
+                parameter_name = scheme.get("name", "X-API-Key")
+                if location == "header":
+                    headers[parameter_name] = api_key
+                    return headers, query_params
+                if location == "query":
+                    query_params[parameter_name] = api_key
+                    return headers, query_params
+
+    headers["Authorization"] = f"Bearer {api_key}"
+    headers["X-API-Key"] = api_key
+    return headers, query_params
+
+
+def fetch_json(
+    url: str,
+    *,
+    method: str = "GET",
+    headers: dict[str, str] | None = None,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    body = None
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+    req = request.Request(url, data=body, headers=headers or {}, method=method.upper())
+    try:
+        with request.urlopen(req, timeout=25) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except error.HTTPError as exc:
+        response_body = exc.read().decode("utf-8", errors="replace")
+        raise ValueError(f"Mana Pool API request failed ({exc.code}): {response_body[:300]}") from exc
+    except error.URLError as exc:
+        raise ValueError(f"Mana Pool API request failed: {exc.reason}") from exc
+
+
+def chunked(values: list[str], size: int) -> list[list[str]]:
+    return [values[index : index + size] for index in range(0, len(values), size)]
+
+
+def choose_manapool_candidate(card_candidates: list[dict[str, Any]], set_name: str, card_number: str) -> dict[str, Any] | None:
+    if not card_candidates:
+        return None
+
+    normalized_set_name = normalize_header(set_name)
+    normalized_card_number = normalize_identifier(card_number)
+
+    def candidate_sort_key(candidate: dict[str, Any]) -> tuple[int, int, int, int]:
+        candidate_set_name = normalize_header(candidate.get("set_name", ""))
+        candidate_card_number = normalize_identifier(candidate.get("card_number", ""))
+        set_match = 1 if normalized_set_name and candidate_set_name == normalized_set_name else 0
+        number_match = 1 if normalized_card_number and candidate_card_number == normalized_card_number else 0
+        quantity_available = int(candidate.get("quantity_available") or 0)
+        from_price_cents = int(candidate.get("from_price_cents") or 0)
+        return (set_match, number_match, quantity_available > 0, -from_price_cents)
+
+    return max(card_candidates, key=candidate_sort_key)
+
+
+def load_manapool_price_lookup(
+    tcg_df: pd.DataFrame,
+    column_map: dict[str, str],
+    manapool_api_key: str | None,
+) -> tuple[dict[tuple[str, str, str], float], dict[tuple[str, str, str], str], str | None]:
+    if not manapool_api_key:
+        return {}, {}, None
+
+    product_name_column = column_map.get("Product Name")
+    set_name_column = column_map.get("Set Name")
+    number_column = column_map.get("Number")
+    if not product_name_column or not set_name_column:
+        return {}, {}, None
+
+    unique_names = sorted(
+        {
+            safe_text(row.get(product_name_column, ""))
+            for _, row in tcg_df.iterrows()
+            if safe_text(row.get(product_name_column, ""))
+        }
+    )
+    if not unique_names:
+        return {}, {}, None
+
+    try:
+        base_url, path, headers, query_auth = discover_manapool_card_lookup(manapool_api_key)
+        endpoint_url = parse.urljoin(base_url.rstrip("/") + "/", path.lstrip("/"))
+        cards_by_name: dict[str, list[dict[str, Any]]] = {}
+
+        for name_batch in chunked(unique_names, 100):
+            request_url = endpoint_url
+            if query_auth:
+                request_url = f"{endpoint_url}?{parse.urlencode(query_auth)}"
+            response = fetch_json(
+                request_url,
+                method="POST",
+                headers=headers,
+                payload={"card_names": name_batch},
+            )
+            for card in response.get("cards", []):
+                if int(card.get("quantity_available") or 0) <= 0:
+                    continue
+                if int(card.get("from_price_cents") or 0) <= 0:
+                    continue
+                cards_by_name.setdefault(normalize_header(card.get("name", "")), []).append(card)
+
+        price_lookup: dict[tuple[str, str, str], float] = {}
+        source_lookup: dict[tuple[str, str, str], str] = {}
+        for _, row in tcg_df.iterrows():
+            product_name = safe_text(row.get(product_name_column, ""))
+            set_name = safe_text(row.get(set_name_column, ""))
+            card_number = safe_text(row.get(number_column, "")) if number_column else ""
+            row_key = (
+                normalize_header(product_name),
+                normalize_header(set_name),
+                normalize_identifier(card_number),
+            )
+            candidate = choose_manapool_candidate(cards_by_name.get(normalize_header(product_name), []), set_name, card_number)
+            if not candidate:
+                continue
+            price_lookup[row_key] = round(int(candidate.get("from_price_cents", 0)) / 100, 2)
+            set_match = normalize_header(candidate.get("set_name", "")) == normalize_header(set_name)
+            number_match = normalize_identifier(candidate.get("card_number", "")) == normalize_identifier(card_number)
+            if set_match and number_match:
+                source_lookup[row_key] = "Mana Pool API floor (exact set/number match)"
+            elif set_match:
+                source_lookup[row_key] = "Mana Pool API floor (set match)"
+            else:
+                source_lookup[row_key] = "Mana Pool API floor (best available name match)"
+        return price_lookup, source_lookup, None
+    except Exception as exc:
+        return {}, {}, f"Mana Pool API lookup unavailable, so TCG fallback pricing was used instead. Details: {exc}"
+
+
 def build_analysis_dataframe(summary: dict[str, Any], settings: OptimizerSettings) -> pd.DataFrame:
     rows = [
         {"Metric": "Total rows imported", "Value": summary["total_rows_imported"]},
@@ -344,6 +585,8 @@ def build_analysis_dataframe(summary: dict[str, Any], settings: OptimizerSetting
             "Value": summary["forced_manapool_min_count"],
         },
         {"Metric": "Number of cards where Direct bump exceeded max allowed %", "Value": summary["direct_bump_exceeded_count"]},
+        {"Metric": "Cards priced from Mana Pool API", "Value": summary["manapool_api_price_count"]},
+        {"Metric": "Cards priced from TCG fallback", "Value": summary["manapool_fallback_price_count"]},
         {"Metric": "Manapool listings at or above tracked shipping threshold", "Value": summary["tracked_shipping_review_count"]},
         {
             "Metric": "Tracked shipping review warning",
@@ -359,7 +602,11 @@ def build_analysis_dataframe(summary: dict[str, Any], settings: OptimizerSetting
     return pd.DataFrame(rows)
 
 
-def process_files(tcgplayer_bytes: bytes, settings: OptimizerSettings) -> ProcessResult:
+def process_files(
+    tcgplayer_bytes: bytes,
+    settings: OptimizerSettings,
+    manapool_api_key: str | None = None,
+) -> ProcessResult:
     tcg_df = load_tcgplayer_dataframe(tcgplayer_bytes)
 
     column_map, missing_columns = map_tcgplayer_columns(tcg_df)
@@ -388,6 +635,8 @@ def process_files(tcgplayer_bytes: bytes, settings: OptimizerSettings) -> Proces
             "missing_price_data_count": 0,
             "forced_manapool_min_count": 0,
             "direct_bump_exceeded_count": 0,
+            "manapool_api_price_count": 0,
+            "manapool_fallback_price_count": 0,
             "tracked_shipping_review_count": 0,
         }
         analysis_df = build_analysis_dataframe(summary, settings)
@@ -406,6 +655,12 @@ def process_files(tcgplayer_bytes: bytes, settings: OptimizerSettings) -> Proces
             warning_message="Required columns are missing from the TCGPlayer export.",
         )
 
+    manapool_price_lookup, manapool_source_lookup, manapool_lookup_warning = load_manapool_price_lookup(
+        tcg_df,
+        column_map,
+        manapool_api_key,
+    )
+
     manapool_rows: list[dict[str, Any]] = []
     direct_rows: list[dict[str, Any]] = []
     manapool_csv_rows: list[dict[str, Any]] = []
@@ -416,6 +671,8 @@ def process_files(tcgplayer_bytes: bytes, settings: OptimizerSettings) -> Proces
     missing_price_data_count = 0
     forced_manapool_min_count = 0
     direct_bump_exceeded_count = 0
+    manapool_api_price_count = 0
+    manapool_fallback_price_count = 0
 
     for _, row in tcg_df.iterrows():
         row_errors: list[str] = []
@@ -448,7 +705,7 @@ def process_files(tcgplayer_bytes: bytes, settings: OptimizerSettings) -> Proces
         direct_low = parsed_values.get("direct_low")
         low_price = parsed_values.get("low_price")
 
-        if low_price is None and market_price is None:
+        if low_price is None and market_price is None and not manapool_price_lookup:
             row_errors.append("Missing both TCG Low Price and TCG Market Price")
         if direct_low is None and market_price is None:
             row_errors.append("Missing both TCG Direct Low and TCG Market Price")
@@ -462,8 +719,30 @@ def process_files(tcgplayer_bytes: bytes, settings: OptimizerSettings) -> Proces
         assert quantity is not None
         total_quantity_imported += quantity
 
-        chosen_manapool_base = low_price if low_price is not None else market_price
-        assert chosen_manapool_base is not None
+        product_name = safe_text(row.get(column_map["Product Name"], ""))
+        set_name = safe_text(row.get(column_map["Set Name"], ""))
+        card_number = safe_text(row.get(column_map.get("Number", ""), "")) if column_map.get("Number") else ""
+        row_key = (
+            normalize_header(product_name),
+            normalize_header(set_name),
+            normalize_identifier(card_number),
+        )
+
+        api_manapool_price = manapool_price_lookup.get(row_key)
+        if api_manapool_price is not None:
+            chosen_manapool_base = api_manapool_price
+            manapool_price_source = manapool_source_lookup.get(row_key, "Mana Pool API floor")
+            manapool_api_price_count += 1
+        else:
+            chosen_manapool_base = low_price if low_price is not None else market_price
+            manapool_price_source = "TCG fallback pricing"
+            manapool_fallback_price_count += 1
+
+        if chosen_manapool_base is None:
+            missing_price_data_count += 1
+            error_rows.append(build_error_row(row, "Missing both Mana Pool lookup price and TCG fallback price", source_columns))
+            continue
+
         forced_min = chosen_manapool_base < settings.manapool_min_price
         manapool_price = max(chosen_manapool_base, settings.manapool_min_price)
         if forced_min:
@@ -487,7 +766,7 @@ def process_files(tcgplayer_bytes: bytes, settings: OptimizerSettings) -> Proces
         direct_net = lookup_direct_net(direct_listing_price) if direct_listing_price is not None else None
         direct_bump_pct = None
         bump_exceeded = False
-        reason_parts: list[str] = []
+        reason_parts = [manapool_price_source]
 
         if forced_min:
             reason_parts.append("Forced to Manapool minimum")
@@ -514,9 +793,9 @@ def process_files(tcgplayer_bytes: bytes, settings: OptimizerSettings) -> Proces
         row_base = {
             "TCGplayer Id": safe_text(row.get(column_map["TCGplayer Id"], "")),
             "Product Line": safe_text(row.get(column_map["Product Line"], "")),
-            "Set Name": safe_text(row.get(column_map["Set Name"], "")),
-            "Product Name": safe_text(row.get(column_map["Product Name"], "")),
-            "Number": safe_text(row.get(column_map.get("Number", ""), "")) if column_map.get("Number") else "",
+            "Set Name": set_name,
+            "Product Name": product_name,
+            "Number": card_number,
             "Rarity": safe_text(row.get(column_map.get("Rarity", ""), "")) if column_map.get("Rarity") else "",
             "Condition": safe_text(row.get(column_map.get("Condition", ""), "")) if column_map.get("Condition") else "",
             "Quantity": normalize_quantity(quantity),
@@ -600,15 +879,18 @@ def process_files(tcgplayer_bytes: bytes, settings: OptimizerSettings) -> Proces
         "missing_price_data_count": missing_price_data_count,
         "forced_manapool_min_count": forced_manapool_min_count,
         "direct_bump_exceeded_count": direct_bump_exceeded_count,
+        "manapool_api_price_count": manapool_api_price_count,
+        "manapool_fallback_price_count": manapool_fallback_price_count,
         "tracked_shipping_review_count": tracked_shipping_review_count,
     }
 
     analysis_df = build_analysis_dataframe(summary, settings)
-    warning_message = None
+    warnings: list[str] = []
+    if manapool_lookup_warning:
+        warnings.append(manapool_lookup_warning)
     if tracked_shipping_review_count:
-        warning_message = (
-            f"{tracked_shipping_review_count} Manapool listing(s) are at or above "
-            f"${settings.tracked_shipping_threshold:.2f} and may need manual tracked-shipping review."
+        warnings.append(
+            f"{tracked_shipping_review_count} Manapool listing(s) are at or above ${settings.tracked_shipping_threshold:.2f} and may need manual tracked-shipping review."
         )
 
     return ProcessResult(
@@ -623,5 +905,5 @@ def process_files(tcgplayer_bytes: bytes, settings: OptimizerSettings) -> Proces
         summary=summary,
         settings=settings,
         missing_columns=missing_columns,
-        warning_message=warning_message,
+        warning_message="\n\n".join(warnings) if warnings else None,
     )
