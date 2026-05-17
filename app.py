@@ -11,6 +11,8 @@ from pricing_logic import OptimizerSettings, process_files
 from workbook_writer import build_workbook
 
 
+APP_VERSION = "0.1"
+
 st.set_page_config(
     page_title="Card Marketplace Listing Optimizer",
     layout="wide",
@@ -222,7 +224,7 @@ def main() -> None:
     manapool_email = get_manapool_email()
 
     st.title("Card Marketplace Listing Optimizer")
-    st.caption("Compare TCGPlayer Direct vs Manapool and generate optimized listing sheets.")
+    st.caption(f"Compare TCGPlayer Direct vs Manapool and generate optimized listing sheets. App version {APP_VERSION}.")
     st.info("TCGPlayer Direct fees are now built into the app: under $2.50 the net is 50% of item value, and at $2.50 or higher the fee model is $1.12 + 8.95% + 2.5%.")
     if manapool_api_key:
         if manapool_email:
@@ -235,6 +237,7 @@ def main() -> None:
     with st.expander("Mana Pool Credential Diagnostics"):
         diagnostics_df = pd.DataFrame(
             [
+                {"Check": "App version", "Status": APP_VERSION},
                 {"Check": "Mana Pool email loaded", "Status": "Yes" if bool(manapool_email) else "No"},
                 {"Check": "Mana Pool email looks like an email", "Status": "Yes" if manapool_email and "@" in manapool_email else "No"},
                 {"Check": "Mana Pool API token loaded", "Status": "Yes" if bool(manapool_api_key) else "No"},
@@ -242,7 +245,7 @@ def main() -> None:
             ]
         )
         st.dataframe(diagnostics_df, use_container_width=True, hide_index=True)
-        st.caption("This panel only shows yes/no checks. It does not reveal your email or API token.")
+        st.caption("This panel only shows safe diagnostic values. It does not reveal your email or API token.")
 
     st.markdown('<div class="upload-panel">', unsafe_allow_html=True)
     tcgplayer_file = st.file_uploader("Upload TCGPlayer CSV export", type=["csv"])
