@@ -71,6 +71,39 @@ REQUIRED_COLUMNS = [
     "Total Quantity",
 ]
 
+PERCENT_SETTING_FIELDS = {
+    "manapool_platform_fee",
+    "credit_card_fee",
+    "max_direct_bump_pct",
+}
+
+CURRENCY_SETTING_FIELDS = {
+    "manapool_min_price",
+    "processing_fee",
+    "buyer_shipping_charged",
+    "stamp_cost",
+    "toploader_cost",
+    "envelope_cost",
+    "team_bag_cost",
+    "tracked_shipping_threshold",
+    "tracked_shipping_cost",
+}
+
+SETTING_LABELS = {
+    "manapool_min_price": "Manapool minimum price",
+    "manapool_platform_fee": "Manapool platform fee",
+    "credit_card_fee": "Credit card fee",
+    "processing_fee": "Processing fee",
+    "buyer_shipping_charged": "Buyer shipping charged",
+    "stamp_cost": "Stamp cost",
+    "toploader_cost": "Toploader cost",
+    "envelope_cost": "Envelope cost",
+    "team_bag_cost": "Team bag cost",
+    "max_direct_bump_pct": "Maximum Direct bump percentage",
+    "tracked_shipping_threshold": "Manapool free tracked shipping threshold",
+    "tracked_shipping_cost": "Tracked shipping cost",
+}
+
 
 @dataclass
 class OptimizerSettings:
@@ -84,8 +117,6 @@ class OptimizerSettings:
     envelope_cost: float = 0.03
     team_bag_cost: float = 0.03
     max_direct_bump_pct: float = 0.20
-    direct_cliff_start: float = 3.00
-    direct_cliff_end: float = 3.40
     tracked_shipping_threshold: float = 50.00
     tracked_shipping_cost: float = 6.00
 
@@ -96,16 +127,19 @@ class OptimizerSettings:
     def as_display_rows(self) -> list[dict[str, Any]]:
         rows = []
         for key, value in asdict(self).items():
-            label = key.replace("_", " ").title()
-            if "pct" in key or "fee" in key:
-                display = f"{value:.2%}" if value <= 1 else f"{value:.2f}"
+            label = SETTING_LABELS.get(key, key.replace("_", " ").title())
+            if key in PERCENT_SETTING_FIELDS:
+                display = f"{value:.2%}"
+            elif key in CURRENCY_SETTING_FIELDS:
+                display = f"${value:.2f}"
             else:
-                display = f"{value:.2f}" if isinstance(value, float) else value
+                display = str(value)
             rows.append({"Metric": label, "Value": display})
+        rows.append({"Metric": "Actual shipping/supply cost", "Value": f"${self.shipping_supply_cost:.2f}"})
         rows.append(
             {
-                "Metric": "Actual Shipping/Supply Cost",
-                "Value": f"${self.shipping_supply_cost:.2f}",
+                "Metric": "TCGPlayer Direct fee model",
+                "Value": "< $2.50 = 50% of item value; >= $2.50 = $1.12 + 8.95% + 2.5%",
             }
         )
         return rows
@@ -217,6 +251,12 @@ def calculate_manapool_net(card_price: float, settings: OptimizerSettings) -> fl
 
 
 def calculate_direct_net(listing_price: float) -> float:
+    """Apply the current TCGPlayer Direct fee model.
+
+    Under $2.50, Direct nets 50% of item value.
+    At $2.50 and above, fees are a flat $1.12 plus 8.95% marketplace commission
+    plus 2.5% credit-card processing.
+    """
     if listing_price < 2.50:
         return round(listing_price * 0.50, 2)
     fees = 1.12 + (listing_price * 0.0895) + (listing_price * 0.025)
@@ -233,15 +273,12 @@ def find_required_direct_price(target_net: float) -> float | None:
     if target_net <= 0:
         return 0.01
 
+    rounded_target = round(target_net, 2)
     for cents in range(1, 500001):
         listing_price = cents / 100
-        if calculate_direct_net(listing_price) >= round(target_net, 2):
+        if calculate_direct_net(listing_price) >= rounded_target:
             return round(listing_price, 2)
     return None
-
-
-def find_next_direct_price_above(threshold: float) -> float | None:
-    return round(threshold + 0.01, 2)
 
 
 def calculate_direct_bump_pct(base_price: float | None, required_price: float | None) -> float | None:
@@ -307,12 +344,6 @@ def build_analysis_dataframe(summary: dict[str, Any], settings: OptimizerSetting
             "Value": summary["forced_manapool_min_count"],
         },
         {"Metric": "Number of cards where Direct bump exceeded max allowed %", "Value": summary["direct_bump_exceeded_count"]},
-        {
-            "Metric": (
-                f"Number of cards affected by the ${settings.direct_cliff_start:.2f}-${settings.direct_cliff_end:.2f} Direct cliff"
-            ),
-            "Value": summary["direct_cliff_affected_count"],
-        },
         {"Metric": "Manapool listings at or above tracked shipping threshold", "Value": summary["tracked_shipping_review_count"]},
         {
             "Metric": "Tracked shipping review warning",
@@ -328,12 +359,7 @@ def build_analysis_dataframe(summary: dict[str, Any], settings: OptimizerSetting
     return pd.DataFrame(rows)
 
 
-def process_files(
-    tcgplayer_bytes: bytes,
-    direct_fee_bytes: bytes | None,
-    direct_fee_filename: str | None,
-    settings: OptimizerSettings,
-) -> ProcessResult:
+def process_files(tcgplayer_bytes: bytes, settings: OptimizerSettings) -> ProcessResult:
     tcg_df = load_tcgplayer_dataframe(tcgplayer_bytes)
 
     column_map, missing_columns = map_tcgplayer_columns(tcg_df)
@@ -362,13 +388,12 @@ def process_files(
             "missing_price_data_count": 0,
             "forced_manapool_min_count": 0,
             "direct_bump_exceeded_count": 0,
-            "direct_cliff_affected_count": 0,
             "tracked_shipping_review_count": 0,
         }
         analysis_df = build_analysis_dataframe(summary, settings)
         return ProcessResult(
-            manapool_full_df=pd.DataFrame(columns=DISPLAY_COLUMNS_MANAPOOL + ["_forced_min", "_bump_exceeded", "_cliff_affected"]),
-            direct_full_df=pd.DataFrame(columns=DISPLAY_COLUMNS_DIRECT + ["_bump_exceeded", "_cliff_affected"]),
+            manapool_full_df=pd.DataFrame(columns=DISPLAY_COLUMNS_MANAPOOL + ["_forced_min", "_bump_exceeded"]),
+            direct_full_df=pd.DataFrame(columns=DISPLAY_COLUMNS_DIRECT + ["_bump_exceeded"]),
             manapool_preview_df=pd.DataFrame(columns=DISPLAY_COLUMNS_MANAPOOL),
             direct_preview_df=pd.DataFrame(columns=DISPLAY_COLUMNS_DIRECT),
             manapool_csv_df=pd.DataFrame(columns=source_columns),
@@ -391,7 +416,6 @@ def process_files(
     missing_price_data_count = 0
     forced_manapool_min_count = 0
     direct_bump_exceeded_count = 0
-    direct_cliff_affected_count = 0
 
     for _, row in tcg_df.iterrows():
         row_errors: list[str] = []
@@ -415,10 +439,7 @@ def process_files(
 
         add_quantity = parsed_values.get("add_quantity")
         total_quantity = parsed_values.get("total_quantity")
-        if add_quantity is not None and add_quantity > 0:
-            quantity = add_quantity
-        else:
-            quantity = total_quantity
+        quantity = add_quantity if add_quantity is not None and add_quantity > 0 else total_quantity
 
         if quantity is None or quantity <= 0:
             row_errors.append("Missing quantity")
@@ -462,65 +483,33 @@ def process_files(
         if base_direct_price is not None and base_direct_net is not None and base_direct_net >= manapool_net:
             required_direct_price = round(base_direct_price, 2)
 
-        cliff_affected = False
-        bump_exceeded = False
+        direct_listing_price = required_direct_price
+        direct_net = lookup_direct_net(direct_listing_price) if direct_listing_price is not None else None
         direct_bump_pct = None
+        bump_exceeded = False
         reason_parts: list[str] = []
 
         if forced_min:
             reason_parts.append("Forced to Manapool minimum")
 
-        direct_listing_price = required_direct_price
-        display_required_direct_price = required_direct_price
-        direct_net = lookup_direct_net(direct_listing_price) if direct_listing_price is not None else None
-
         if direct_listing_price is None or direct_net is None:
-            reason_parts.append("Required Direct Price not found")
             destination = "manapool"
+            reason_parts.append("Required Direct Price not found")
         else:
-            if settings.direct_cliff_start <= direct_listing_price <= settings.direct_cliff_end:
-                cliff_affected = True
-                direct_cliff_affected_count += 1
-                pre_cliff_price = round(max(settings.direct_cliff_start - 0.01, 0.01), 2)
-                pre_cliff_net = lookup_direct_net(pre_cliff_price)
-                if pre_cliff_net is not None and pre_cliff_net >= manapool_net:
-                    direct_listing_price = pre_cliff_price
-                    display_required_direct_price = pre_cliff_price
-                    direct_net = pre_cliff_net
-                    reason_parts.append("Adjusted to avoid Direct pricing cliff")
-                else:
-                    post_cliff_price = find_next_direct_price_above(settings.direct_cliff_end)
-                    if post_cliff_price is None:
-                        reason_parts.append("No valid Direct price above pricing cliff")
-                        destination = "manapool"
-                        direct_listing_price = None
-                        direct_net = None
-                    else:
-                        direct_listing_price = post_cliff_price
-                        display_required_direct_price = post_cliff_price
-                        direct_net = lookup_direct_net(post_cliff_price)
-                        reason_parts.append("Bumped above Direct pricing cliff")
-
-            if direct_listing_price is None or direct_net is None:
+            direct_bump_pct = calculate_direct_bump_pct(base_direct_price, direct_listing_price)
+            if direct_bump_pct is None:
                 destination = "manapool"
+                bump_exceeded = True
+                direct_bump_exceeded_count += 1
+                reason_parts.append("Unable to calculate Direct bump %")
+            elif direct_bump_pct > settings.max_direct_bump_pct:
+                destination = "manapool"
+                bump_exceeded = True
+                direct_bump_exceeded_count += 1
+                reason_parts.append("Required Direct bump exceeded max allowed %")
             else:
-                direct_bump_pct = calculate_direct_bump_pct(base_direct_price, direct_listing_price)
-                if direct_bump_pct is None:
-                    bump_exceeded = True
-                    direct_bump_exceeded_count += 1
-                    reason_parts.append("Unable to calculate Direct bump %")
-                    destination = "manapool"
-                elif direct_bump_pct > settings.max_direct_bump_pct:
-                    bump_exceeded = True
-                    direct_bump_exceeded_count += 1
-                    if base_direct_price is not None and base_direct_price < settings.direct_cliff_start:
-                        reason_parts.append("Base Direct price below cliff and required bump exceeded max")
-                    else:
-                        reason_parts.append("Required Direct bump exceeded max allowed %")
-                    destination = "manapool"
-                else:
-                    destination = "direct"
-                    reason_parts.append("Direct net meets or beats Manapool within bump limit")
+                destination = "direct"
+                reason_parts.append("Direct net meets or beats Manapool within bump limit")
 
         row_base = {
             "TCGplayer Id": safe_text(row.get(column_map["TCGplayer Id"], "")),
@@ -545,7 +534,6 @@ def process_files(
                     "Direct Bump %": direct_bump_pct,
                     "Reason": "; ".join(reason_parts),
                     "_bump_exceeded": bump_exceeded,
-                    "_cliff_affected": cliff_affected,
                 }
             )
         else:
@@ -559,22 +547,21 @@ def process_files(
                     "Manapool Net": round(manapool_net, 2),
                     "Base Direct Price": round(base_direct_price, 2) if base_direct_price is not None else None,
                     "Base Direct Net": round(base_direct_net, 2) if base_direct_net is not None else None,
-                    "Required Direct Price": round(display_required_direct_price, 2) if display_required_direct_price is not None else None,
+                    "Required Direct Price": round(direct_listing_price, 2) if direct_listing_price is not None else None,
                     "Direct Bump %": direct_bump_pct,
                     "Reason": "; ".join(reason_parts),
                     "_forced_min": forced_min,
                     "_bump_exceeded": bump_exceeded,
-                    "_cliff_affected": cliff_affected,
                 }
             )
 
     manapool_full_df = pd.DataFrame(
         manapool_rows,
-        columns=DISPLAY_COLUMNS_MANAPOOL + ["_forced_min", "_bump_exceeded", "_cliff_affected"],
+        columns=DISPLAY_COLUMNS_MANAPOOL + ["_forced_min", "_bump_exceeded"],
     )
     direct_full_df = pd.DataFrame(
         direct_rows,
-        columns=DISPLAY_COLUMNS_DIRECT + ["_bump_exceeded", "_cliff_affected"],
+        columns=DISPLAY_COLUMNS_DIRECT + ["_bump_exceeded"],
     )
     errors_df = pd.DataFrame(error_rows)
 
@@ -613,7 +600,6 @@ def process_files(
         "missing_price_data_count": missing_price_data_count,
         "forced_manapool_min_count": forced_manapool_min_count,
         "direct_bump_exceeded_count": direct_bump_exceeded_count,
-        "direct_cliff_affected_count": direct_cliff_affected_count,
         "tracked_shipping_review_count": tracked_shipping_review_count,
     }
 
