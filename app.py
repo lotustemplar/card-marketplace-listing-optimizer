@@ -11,7 +11,7 @@ from pricing_logic import OptimizerSettings, process_files
 from workbook_writer import build_workbook
 
 
-APP_VERSION = "0.6"
+APP_VERSION = "0.7"
 
 st.set_page_config(
     page_title="Card Marketplace Listing Optimizer",
@@ -102,6 +102,28 @@ def dataframe_to_plain_csv_bytes(dataframe: pd.DataFrame) -> bytes:
     return csv_text.encode("cp1252", errors="replace")
 
 
+def run_optimizer(
+    tcgplayer_bytes: bytes,
+    settings: OptimizerSettings,
+    manapool_api_key: str | None,
+    manapool_email: str | None,
+    match_overrides: dict[str, dict[str, object]] | None = None,
+) -> None:
+    result = process_files(
+        tcgplayer_bytes=tcgplayer_bytes,
+        settings=settings,
+        manapool_api_key=manapool_api_key,
+        manapool_email=manapool_email,
+        manapool_match_overrides=match_overrides,
+    )
+    workbook_bytes = build_workbook(result)
+    st.session_state["optimizer_result"] = pickle.dumps(result)
+    st.session_state["optimizer_workbook_bytes"] = workbook_bytes
+    st.session_state["optimizer_timestamp"] = datetime.now().strftime("%Y-%m-%d_%H%M")
+    st.session_state["optimizer_source_bytes"] = tcgplayer_bytes
+    st.session_state["optimizer_match_overrides"] = match_overrides or {}
+
+
 def render_summary(result) -> None:
     summary = result.summary
     metric_one, metric_two, metric_three, metric_four = st.columns(4)
@@ -170,6 +192,68 @@ def render_result(result, workbook_bytes: bytes, timestamp: str) -> None:
         st.dataframe(result.errors_df, width="stretch", hide_index=True)
 
 
+def render_manual_resolution_panel(
+    result,
+    settings: OptimizerSettings,
+    manapool_api_key: str | None,
+    manapool_email: str | None,
+) -> None:
+    unresolved_options = result.unresolved_options
+    if not unresolved_options:
+        return
+
+    st.subheader("Resolve Mana Pool Matches")
+    st.caption("These rows had Mana Pool candidates by card name, but not a confident exact set and number match. Pick the right printing from the dropdown and re-run using your selections.")
+
+    current_overrides = st.session_state.get("optimizer_match_overrides", {})
+    with st.form("manapool_match_override_form"):
+        for item in unresolved_options:
+            st.markdown(f"**{item['product_name']}** | {item['set_name']} | #{item['number'] or '?'}")
+            labels = ["Use TCG fallback"] + [option["label"] for option in item["options"]]
+            default_label = "Use TCG fallback"
+            existing_override = current_overrides.get(item["row_key"])
+            if existing_override and existing_override.get("label") in labels:
+                default_label = existing_override["label"]
+            st.selectbox(
+                "Choose Mana Pool match",
+                labels,
+                index=labels.index(default_label),
+                key=f"override_select_{item['row_key']}",
+                label_visibility="collapsed",
+            )
+
+        submitted = st.form_submit_button("Apply Mana Pool Match Overrides")
+
+    if submitted:
+        match_overrides: dict[str, dict[str, object]] = {}
+        for item in unresolved_options:
+            selected_label = st.session_state.get(f"override_select_{item['row_key']}", "Use TCG fallback")
+            if selected_label == "Use TCG fallback":
+                continue
+            selected_option = next((option for option in item["options"] if option["label"] == selected_label), None)
+            if not selected_option:
+                continue
+            match_overrides[item["row_key"]] = {
+                "price": selected_option["price"],
+                "label": selected_option["label"],
+                "reason": f"Mana Pool manual override: {selected_option['label']}",
+            }
+
+        source_bytes = st.session_state.get("optimizer_source_bytes")
+        if not source_bytes:
+            st.error("The original TCGPlayer CSV is no longer in session. Please upload it again and regenerate.")
+            return
+
+        run_optimizer(
+            tcgplayer_bytes=source_bytes,
+            settings=settings,
+            manapool_api_key=manapool_api_key,
+            manapool_email=manapool_email,
+            match_overrides=match_overrides,
+        )
+        st.rerun()
+
+
 def main() -> None:
     require_password_if_needed()
 
@@ -226,13 +310,13 @@ def main() -> None:
     st.title("Card Marketplace Listing Optimizer")
     st.caption(f"Compare TCGPlayer Direct vs Manapool and generate optimized listing sheets. App version {APP_VERSION}.")
     st.info("TCGPlayer Direct fees are built into the app: under $2.50 the net is 50% of item value, and at $2.50 or higher the fee model is $1.12 + 8.95% + 2.5%.")
-    st.success("Mana Pool pricing now uses the official Mana Pool API /card_info endpoint with Mana Pool's documented email and access-token headers. If a card cannot be matched cleanly, the app falls back to TCG pricing for that row.")
+    st.success("Mana Pool pricing now uses the official Mana Pool API /card_info endpoint. If a row cannot be matched cleanly, you can now manually choose the correct Mana Pool printing from API-returned candidates before re-running.")
 
     with st.expander("Mana Pool Credential Diagnostics"):
         diagnostics_df = pd.DataFrame(
             [
                 {"Check": "App version", "Status": APP_VERSION},
-                {"Check": "Mana Pool lookup mode", "Status": "Official API /card_info"},
+                {"Check": "Mana Pool lookup mode", "Status": "Official API /card_info + manual overrides"},
                 {"Check": "Mana Pool email loaded", "Status": "Yes" if bool(manapool_email) else "No"},
                 {"Check": "Mana Pool email looks like an email", "Status": "Yes" if bool(manapool_email and "@" in manapool_email) else "No"},
                 {"Check": "Mana Pool API token loaded", "Status": "Yes" if bool(manapool_api_key) else "No"},
@@ -253,16 +337,13 @@ def main() -> None:
             return
 
         try:
-            result = process_files(
+            run_optimizer(
                 tcgplayer_bytes=tcgplayer_file.getvalue(),
                 settings=settings,
                 manapool_api_key=manapool_api_key,
                 manapool_email=manapool_email,
+                match_overrides={},
             )
-            workbook_bytes = build_workbook(result)
-            st.session_state["optimizer_result"] = pickle.dumps(result)
-            st.session_state["optimizer_workbook_bytes"] = workbook_bytes
-            st.session_state["optimizer_timestamp"] = datetime.now().strftime("%Y-%m-%d_%H%M")
         except Exception as exc:
             st.error(f"Processing failed: {exc}")
             return
@@ -275,10 +356,17 @@ def main() -> None:
         st.info("Upload your TCGPlayer CSV, adjust any settings you want in the sidebar, and generate the workbook.")
         return
 
+    result = pickle.loads(stored_result)
     render_result(
-        result=pickle.loads(stored_result),
+        result=result,
         workbook_bytes=stored_workbook_bytes,
         timestamp=stored_timestamp,
+    )
+    render_manual_resolution_panel(
+        result=result,
+        settings=settings,
+        manapool_api_key=manapool_api_key,
+        manapool_email=manapool_email,
     )
 
 
