@@ -4,7 +4,7 @@ import importlib
 import sys
 
 try:
-    safe_module = importlib.import_module("pricing_logic_safe")
-    sys.modules["pricing_logic_bulk"] = safe_module
+    api_module = importlib.import_module("pricing_logic_api")
+    sys.modules["pricing_logic_bulk"] = api_module
 except Exception:
     pass
