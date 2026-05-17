@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from html import unescape
 from io import BytesIO
+import base64
 import json
 import re
-import time
-import unicodedata
 from typing import Any
 from urllib import error, parse, request
 
@@ -48,7 +46,6 @@ DISPLAY_COLUMNS_DIRECT = [
     "Reason",
 ]
 
-
 COLUMN_ALIASES = {
     "TCGplayer Id": ["tcgplayer id", "tcgplayerid"],
     "Product Line": ["product line", "productline"],
@@ -64,7 +61,6 @@ COLUMN_ALIASES = {
     "Total Quantity": ["total quantity", "totalquantity"],
     "Add to Quantity": ["add to quantity", "addtoquantity"],
 }
-
 
 REQUIRED_COLUMNS = [
     "TCGplayer Id",
@@ -110,11 +106,11 @@ SETTING_LABELS = {
     "tracked_shipping_cost": "Tracked shipping cost",
 }
 
-USER_AGENT = "CardMarketplaceListingOptimizer/0.3 (+https://github.com/lotustemplar/card-marketplace-listing-optimizer)"
-SCRYFALL_SEARCH_URL = "https://api.scryfall.com/cards/search"
-MANAPOOL_CARD_BASE_URL = "https://manapool.com/card"
-SCRYFALL_REQUEST_INTERVAL_SECONDS = 0.12
-_SCRYFALL_LAST_REQUEST_AT = 0.0
+USER_AGENT = "CardMarketplaceListingOptimizer/0.5 (+https://github.com/lotustemplar/card-marketplace-listing-optimizer)"
+MANAPOOL_BASE_URL = "https://manapool.com"
+MANAPOOL_OPENAPI_URL = "https://manapool.com/api/docs/v1/openapi.json"
+MANAPOOL_TIMEOUT_SECONDS = 20
+MANAPOOL_BATCH_SIZE = 40
 
 
 @dataclass
@@ -157,7 +153,7 @@ class OptimizerSettings:
         rows.append(
             {
                 "Metric": "Mana Pool price source",
-                "Value": "Public Mana Pool exact-card pages when matched, otherwise TCG fallback pricing",
+                "Value": "Mana Pool API only, using API returned floor pricing when a match is found, otherwise TCG fallback pricing",
             }
         )
         return rows
@@ -198,15 +194,6 @@ def normalize_identifier(value: Any) -> str:
     return "".join(char for char in text if char.isalnum())
 
 
-def slugify_for_url(value: str) -> str:
-    normalized = unicodedata.normalize("NFKD", value)
-    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
-    ascii_text = ascii_text.lower()
-    ascii_text = ascii_text.replace("//", " ")
-    ascii_text = re.sub(r"[^a-z0-9]+", "-", ascii_text)
-    return ascii_text.strip("-") or "card"
-
-
 def parse_uploaded_csv(file_bytes: bytes) -> pd.DataFrame:
     encodings = ["utf-8-sig", "utf-8", "cp1252", "latin-1"]
     last_error: Exception | None = None
@@ -228,7 +215,6 @@ def map_tcgplayer_columns(df: pd.DataFrame) -> tuple[dict[str, str], list[str]]:
     normalized_lookup = {normalize_header(column): column for column in df.columns}
     mapped: dict[str, str] = {}
     missing: list[str] = []
-
     for canonical, aliases in COLUMN_ALIASES.items():
         found = None
         for alias in aliases:
@@ -240,7 +226,6 @@ def map_tcgplayer_columns(df: pd.DataFrame) -> tuple[dict[str, str], list[str]]:
                 missing.append(canonical)
         else:
             mapped[canonical] = found
-
     return mapped, missing
 
 
@@ -249,11 +234,9 @@ def try_parse_number(value: Any) -> tuple[float | None, str | None]:
         return None, None
     if isinstance(value, (int, float)) and not pd.isna(value):
         return float(value), None
-
     text = str(value).strip()
     if text == "" or text.lower() in {"nan", "none", "null", "n/a", "na", "--"}:
         return None, None
-
     cleaned = text.replace("$", "").replace(",", "")
     try:
         return float(cleaned), None
@@ -298,7 +281,6 @@ def lookup_direct_net(proposed_price: float | None) -> float | None:
 def find_required_direct_price(target_net: float) -> float | None:
     if target_net <= 0:
         return 0.01
-
     rounded_target = round(target_net, 2)
     for cents in range(1, 500001):
         listing_price = cents / 100
@@ -331,18 +313,15 @@ def build_upload_row(
     upload_row = {column: safe_text(row.get(column, "")) for column in source_columns}
     formatted_price = f"{listing_price:.2f}"
     formatted_quantity = str(normalize_quantity(float(quantity)))
-
     marketplace_price_column = column_map.get("TCG Marketplace Price")
     if marketplace_price_column:
         upload_row[marketplace_price_column] = formatted_price
-
     add_to_quantity_column = column_map.get("Add to Quantity")
     total_quantity_column = column_map.get("Total Quantity")
     if add_to_quantity_column:
         upload_row[add_to_quantity_column] = formatted_quantity
     elif total_quantity_column:
         upload_row[total_quantity_column] = formatted_quantity
-
     return upload_row
 
 
@@ -353,71 +332,123 @@ def sort_preview(df: pd.DataFrame, display_columns: list[str]) -> pd.DataFrame:
     return sorted_df[display_columns]
 
 
-def throttle_scryfall_request() -> None:
-    global _SCRYFALL_LAST_REQUEST_AT
-    now = time.monotonic()
-    wait_for = SCRYFALL_REQUEST_INTERVAL_SECONDS - (now - _SCRYFALL_LAST_REQUEST_AT)
-    if wait_for > 0:
-        time.sleep(wait_for)
-    _SCRYFALL_LAST_REQUEST_AT = time.monotonic()
-
-
-def fetch_json(url: str, *, throttle_scryfall: bool = False) -> dict[str, Any]:
-    if throttle_scryfall:
-        throttle_scryfall_request()
-    req = request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+def request_json(url: str, *, method: str = "GET", headers: dict[str, str] | None = None, payload: Any | None = None) -> Any:
+    final_headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+    if headers:
+        final_headers.update(headers)
+    data = None
+    if payload is not None:
+        final_headers["Content-Type"] = "application/json"
+        data = json.dumps(payload).encode("utf-8")
+    req = request.Request(url, headers=final_headers, method=method, data=data)
     try:
-        with request.urlopen(req, timeout=20) as response:
+        with request.urlopen(req, timeout=MANAPOOL_TIMEOUT_SECONDS) as response:
             return json.loads(response.read().decode("utf-8"))
     except error.HTTPError as exc:
-        if exc.code == 404:
-            return {}
         body = exc.read().decode("utf-8", errors="replace")
-        raise ValueError(f"Request failed ({exc.code}): {body[:300]}") from exc
+        raise ValueError(f"Request failed ({exc.code}): {body[:400]}") from exc
     except error.URLError as exc:
         raise ValueError(f"Request failed: {exc.reason}") from exc
 
 
-def fetch_text(url: str) -> str:
-    req = request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "text/html"})
-    try:
-        with request.urlopen(req, timeout=20) as response:
-            return response.read().decode("utf-8", errors="replace")
-    except error.HTTPError as exc:
-        if exc.code == 404:
-            return ""
-        body = exc.read().decode("utf-8", errors="replace")
-        raise ValueError(f"Request failed ({exc.code}): {body[:300]}") from exc
-    except error.URLError as exc:
-        raise ValueError(f"Request failed: {exc.reason}") from exc
+def get_auth_header_variants(manapool_api_key: str | None, manapool_email: str | None) -> list[dict[str, str]]:
+    variants: list[dict[str, str]] = [{}]
+    token = safe_text(manapool_api_key)
+    email = safe_text(manapool_email)
+    if token:
+        variants.append({"Authorization": f"Bearer {token}"})
+        variants.append({"X-API-Key": token})
+        variants.append({"api-key": token})
+        variants.append({"x-api-token": token})
+    if token and email:
+        basic = base64.b64encode(f"{email}:{token}".encode("utf-8")).decode("ascii")
+        variants.append({"Authorization": f"Basic {basic}"})
+        variants.append({"X-User-Email": email, "X-API-Key": token})
+        variants.append({"x-user-email": email, "x-api-token": token})
+    unique: list[dict[str, str]] = []
+    seen: set[tuple[tuple[str, str], ...]] = set()
+    for variant in variants:
+        key = tuple(sorted(variant.items()))
+        if key not in seen:
+            seen.add(key)
+            unique.append(variant)
+    return unique
 
 
-def search_scryfall_cards(product_name: str, search_cache: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
-    cache_key = normalize_header(product_name)
-    if cache_key in search_cache:
-        return search_cache[cache_key]
-
-    queries = [f'!"{product_name}"', product_name]
-    results: list[dict[str, Any]] = []
-    for query in queries:
-        params = {
-            "q": query,
-            "unique": "prints",
-            "include_extras": "true",
-            "order": "released",
-            "dir": "desc",
-        }
-        url = f"{SCRYFALL_SEARCH_URL}?{parse.urlencode(params)}"
-        payload = fetch_json(url, throttle_scryfall=True)
-        maybe_results = payload.get("data", []) if isinstance(payload, dict) else []
-        if maybe_results:
-            results = maybe_results
-            break
-    search_cache[cache_key] = results
-    return results
+def schema_mentions_card_names(schema: Any) -> bool:
+    if isinstance(schema, dict):
+        if "card_names" in schema.get("properties", {}):
+            return True
+        return any(schema_mentions_card_names(value) for value in schema.values())
+    if isinstance(schema, list):
+        return any(schema_mentions_card_names(value) for value in schema)
+    return False
 
 
-def choose_scryfall_match(cards: list[dict[str, Any]], product_name: str, set_name: str, card_number: str) -> dict[str, Any] | None:
+def schema_mentions_from_price(schema: Any) -> bool:
+    if isinstance(schema, dict):
+        if "from_price_cents" in schema.get("properties", {}):
+            return True
+        return any(schema_mentions_from_price(value) for value in schema.values())
+    if isinstance(schema, list):
+        return any(schema_mentions_from_price(value) for value in schema)
+    return False
+
+
+def discover_manapool_cards_endpoint() -> tuple[str, str]:
+    spec = request_json(MANAPOOL_OPENAPI_URL)
+    paths = spec.get("paths", {}) if isinstance(spec, dict) else {}
+    best_score = -1
+    best_method = "POST"
+    best_path = ""
+
+    for path, path_item in paths.items():
+        if not isinstance(path_item, dict):
+            continue
+        for method, operation in path_item.items():
+            if method.lower() not in {"post", "get"}:
+                continue
+            if not isinstance(operation, dict):
+                continue
+
+            score = 0
+            request_body = operation.get("requestBody", {})
+            content = request_body.get("content", {}) if isinstance(request_body, dict) else {}
+            for content_value in content.values():
+                schema = content_value.get("schema", {}) if isinstance(content_value, dict) else {}
+                if schema_mentions_card_names(schema):
+                    score += 5
+
+            responses = operation.get("responses", {})
+            for response_value in responses.values():
+                response_content = response_value.get("content", {}) if isinstance(response_value, dict) else {}
+                for content_value in response_content.values():
+                    schema = content_value.get("schema", {}) if isinstance(content_value, dict) else {}
+                    if schema_mentions_from_price(schema):
+                        score += 5
+
+            flattened = json.dumps(operation).lower()
+            if "card_names" in flattened:
+                score += 3
+            if "from_price_cents" in flattened:
+                score += 3
+            if "not_found" in flattened:
+                score += 2
+            if re.search(r"/card|/cards", path.lower()):
+                score += 1
+
+            if score > best_score:
+                best_score = score
+                best_method = method.upper()
+                best_path = path
+
+    if not best_path:
+        raise ValueError("Unable to discover Mana Pool card-price endpoint from OpenAPI spec.")
+
+    return best_method, parse.urljoin(f"{MANAPOOL_BASE_URL}/", best_path.lstrip("/"))
+
+
+def choose_manapool_match(cards: list[dict[str, Any]], product_name: str, set_name: str, card_number: str) -> dict[str, Any] | None:
     if not cards:
         return None
 
@@ -428,9 +459,9 @@ def choose_scryfall_match(cards: list[dict[str, Any]], product_name: str, set_na
     def score(card: dict[str, Any]) -> tuple[int, int, int, int]:
         name_match = 1 if normalize_header(card.get("name", "")) == normalized_name else 0
         set_match = 1 if normalize_header(card.get("set_name", "")) == normalized_set_name else 0
-        number_match = 1 if normalized_number and normalize_identifier(card.get("collector_number", "")) == normalized_number else 0
-        release_rank = int(card.get("released_at", "0000-00-00").replace("-", "") or 0)
-        return (set_match, number_match, name_match, release_rank)
+        number_match = 1 if normalized_number and normalize_identifier(card.get("card_number", "")) == normalized_number else 0
+        has_price = 1 if try_parse_number(card.get("from_price_cents"))[0] is not None else 0
+        return (set_match, number_match, name_match, has_price)
 
     best = max(cards, key=score)
     best_score = score(best)
@@ -441,54 +472,54 @@ def choose_scryfall_match(cards: list[dict[str, Any]], product_name: str, set_na
     return best
 
 
-def resolve_manapool_card_page(
-    product_name: str,
-    set_name: str,
-    card_number: str,
-    search_cache: dict[str, list[dict[str, Any]]],
-) -> str | None:
-    candidates = search_scryfall_cards(product_name, search_cache)
-    match = choose_scryfall_match(candidates, product_name, set_name, card_number)
-    if not match:
-        return None
+def fetch_manapool_cards_by_names(
+    card_names: list[str],
+    manapool_api_key: str | None,
+    manapool_email: str | None,
+) -> tuple[dict[str, list[dict[str, Any]]], str | None]:
+    if not card_names:
+        return {}, None
 
-    set_code = safe_text(match.get("set", "")).lower()
-    collector_number = safe_text(match.get("collector_number", "")).lower()
-    if not set_code or not collector_number:
-        return None
-    slug = slugify_for_url(product_name)
-    return f"{MANAPOOL_CARD_BASE_URL}/{set_code}/{collector_number}/{slug}"
+    method, endpoint_url = discover_manapool_cards_endpoint()
+    auth_variants = get_auth_header_variants(manapool_api_key, manapool_email)
+    cards_by_name: dict[str, list[dict[str, Any]]] = {}
+    auth_warning: str | None = None
 
+    for start in range(0, len(card_names), MANAPOOL_BATCH_SIZE):
+        batch = card_names[start : start + MANAPOOL_BATCH_SIZE]
+        payload = {"card_names": batch}
+        last_error: Exception | None = None
+        response_payload: Any = None
 
-def strip_html_to_text(html: str) -> str:
-    text = re.sub(r"<script[\s\S]*?</script>", " ", html, flags=re.IGNORECASE)
-    text = re.sub(r"<style[\s\S]*?</style>", " ", text, flags=re.IGNORECASE)
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = unescape(text)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
+        for headers in auth_variants:
+            try:
+                response_payload = request_json(endpoint_url, method=method, headers=headers, payload=payload)
+                auth_warning = None
+                break
+            except Exception as exc:
+                last_error = exc
+                if "401" not in str(exc) and "403" not in str(exc):
+                    break
 
+        if response_payload is None:
+            raise ValueError(str(last_error) if last_error else "Mana Pool API request failed.")
 
-def extract_lowest_public_price(page_html: str) -> float | None:
-    if not page_html:
-        return None
-    text = strip_html_to_text(page_html)
-    if "No listings found" in text:
-        return None
-    segment = text
-    if "Other Printings" in segment:
-        segment = segment.split("Other Printings", 1)[0]
-    if "Card Text" in segment:
-        segment = segment.split("Card Text", 1)[0]
-    prices = re.findall(r"\$([0-9]+(?:\.[0-9]{1,2})?)", segment)
-    if not prices:
-        return None
-    return round(float(prices[0]), 2)
+        cards = response_payload.get("cards", []) if isinstance(response_payload, dict) else []
+        for card in cards:
+            if not isinstance(card, dict):
+                continue
+            normalized_name = normalize_header(card.get("name", ""))
+            if normalized_name:
+                cards_by_name.setdefault(normalized_name, []).append(card)
+
+    return cards_by_name, auth_warning
 
 
 def load_manapool_price_lookup(
     tcg_df: pd.DataFrame,
     column_map: dict[str, str],
+    manapool_api_key: str | None,
+    manapool_email: str | None,
 ) -> tuple[dict[tuple[str, str, str], float], dict[tuple[str, str, str], str], str | None]:
     product_name_column = column_map.get("Product Name")
     set_name_column = column_map.get("Set Name")
@@ -510,36 +541,38 @@ def load_manapool_price_lookup(
     if not unique_keys:
         return {}, {}, None
 
+    unique_names = sorted({product_name for product_name, _, _ in unique_keys})
+    try:
+        cards_by_name, auth_warning = fetch_manapool_cards_by_names(unique_names, manapool_api_key, manapool_email)
+    except Exception as exc:
+        return {}, {}, f"Mana Pool API lookup was unavailable, so TCG fallback pricing was used instead. Details: {exc}"
+
     price_lookup: dict[tuple[str, str, str], float] = {}
     source_lookup: dict[tuple[str, str, str], str] = {}
     misses = 0
-    search_cache: dict[str, list[dict[str, Any]]] = {}
 
-    try:
-        for product_name, set_name, card_number in unique_keys:
-            page_url = resolve_manapool_card_page(product_name, set_name, card_number, search_cache)
-            if not page_url:
-                misses += 1
-                continue
-            page_html = fetch_text(page_url)
-            price = extract_lowest_public_price(page_html)
-            if price is None:
-                misses += 1
-                continue
-            row_key = (
-                normalize_header(product_name),
-                normalize_header(set_name),
-                normalize_identifier(card_number),
-            )
-            price_lookup[row_key] = price
-            source_lookup[row_key] = "Mana Pool public floor"
+    for product_name, set_name, card_number in unique_keys:
+        row_key = (normalize_header(product_name), normalize_header(set_name), normalize_identifier(card_number))
+        match = choose_manapool_match(cards_by_name.get(normalize_header(product_name), []), product_name, set_name, card_number)
+        if not match:
+            misses += 1
+            continue
 
-        warning = None
-        if misses:
-            warning = f"Mana Pool public lookup matched {len(price_lookup)} exact card page(s). {misses} row key(s) fell back to TCG pricing."
-        return price_lookup, source_lookup, warning
-    except Exception as exc:
-        return {}, {}, f"Mana Pool public lookup was unavailable, so TCG fallback pricing was used instead. Details: {exc}"
+        cents_value, parse_error = try_parse_number(match.get("from_price_cents"))
+        if parse_error or cents_value is None:
+            misses += 1
+            continue
+
+        price_lookup[row_key] = round(cents_value / 100.0, 2)
+        source_lookup[row_key] = "Mana Pool API floor"
+
+    warnings: list[str] = []
+    if misses:
+        warnings.append(f"Mana Pool API lookup matched {len(price_lookup)} row key(s). {misses} row key(s) fell back to TCG pricing.")
+    if auth_warning:
+        warnings.append(auth_warning)
+
+    return price_lookup, source_lookup, "\n\n".join(warnings) if warnings else None
 
 
 def build_analysis_dataframe(summary: dict[str, Any], settings: OptimizerSettings) -> pd.DataFrame:
@@ -559,7 +592,7 @@ def build_analysis_dataframe(summary: dict[str, Any], settings: OptimizerSetting
             "Value": summary["forced_manapool_min_count"],
         },
         {"Metric": "Number of cards where Direct bump exceeded max allowed %", "Value": summary["direct_bump_exceeded_count"]},
-        {"Metric": "Cards priced from Mana Pool public pages", "Value": summary["manapool_public_price_count"]},
+        {"Metric": "Cards priced from Mana Pool API", "Value": summary["manapool_api_price_count"]},
         {"Metric": "Cards priced from TCG fallback", "Value": summary["manapool_fallback_price_count"]},
         {"Metric": "Manapool listings at or above tracked shipping threshold", "Value": summary["tracked_shipping_review_count"]},
         {
@@ -582,10 +615,7 @@ def process_files(
     manapool_api_key: str | None = None,
     manapool_email: str | None = None,
 ) -> ProcessResult:
-    del manapool_api_key, manapool_email
-
     tcg_df = load_tcgplayer_dataframe(tcgplayer_bytes)
-
     column_map, missing_columns = map_tcgplayer_columns(tcg_df)
     source_columns = list(tcg_df.columns)
 
@@ -612,7 +642,7 @@ def process_files(
             "missing_price_data_count": 0,
             "forced_manapool_min_count": 0,
             "direct_bump_exceeded_count": 0,
-            "manapool_public_price_count": 0,
+            "manapool_api_price_count": 0,
             "manapool_fallback_price_count": 0,
             "tracked_shipping_review_count": 0,
         }
@@ -635,6 +665,8 @@ def process_files(
     manapool_price_lookup, manapool_source_lookup, manapool_lookup_warning = load_manapool_price_lookup(
         tcg_df,
         column_map,
+        manapool_api_key,
+        manapool_email,
     )
 
     manapool_rows: list[dict[str, Any]] = []
@@ -647,7 +679,7 @@ def process_files(
     missing_price_data_count = 0
     forced_manapool_min_count = 0
     direct_bump_exceeded_count = 0
-    manapool_public_price_count = 0
+    manapool_api_price_count = 0
     manapool_fallback_price_count = 0
 
     for _, row in tcg_df.iterrows():
@@ -673,21 +705,19 @@ def process_files(
         add_quantity = parsed_values.get("add_quantity")
         total_quantity = parsed_values.get("total_quantity")
         quantity = add_quantity if add_quantity is not None and add_quantity > 0 else total_quantity
-
         if quantity is None or quantity <= 0:
             row_errors.append("Missing quantity")
 
         market_price = parsed_values.get("market_price")
         direct_low = parsed_values.get("direct_low")
         low_price = parsed_values.get("low_price")
-
         if low_price is None and market_price is None and not manapool_price_lookup:
             row_errors.append("Missing both TCG Low Price and TCG Market Price")
         if direct_low is None and market_price is None:
             row_errors.append("Missing both TCG Direct Low and TCG Market Price")
 
         if row_errors:
-            if any("Missing both TCG" in error for error in row_errors):
+            if any("Missing both TCG" in item for item in row_errors):
                 missing_price_data_count += 1
             error_rows.append(build_error_row(row, "; ".join(dict.fromkeys(row_errors)), source_columns))
             continue
@@ -704,11 +734,11 @@ def process_files(
             normalize_identifier(card_number),
         )
 
-        public_manapool_price = manapool_price_lookup.get(row_key)
-        if public_manapool_price is not None:
-            chosen_manapool_base = public_manapool_price
-            manapool_price_source = manapool_source_lookup.get(row_key, "Mana Pool public floor")
-            manapool_public_price_count += 1
+        api_manapool_price = manapool_price_lookup.get(row_key)
+        if api_manapool_price is not None:
+            chosen_manapool_base = api_manapool_price
+            manapool_price_source = manapool_source_lookup.get(row_key, "Mana Pool API floor")
+            manapool_api_price_count += 1
         else:
             chosen_manapool_base = low_price if low_price is not None else market_price
             manapool_price_source = "TCG fallback pricing"
@@ -716,7 +746,7 @@ def process_files(
 
         if chosen_manapool_base is None:
             missing_price_data_count += 1
-            error_rows.append(build_error_row(row, "Missing both Mana Pool public price and TCG fallback price", source_columns))
+            error_rows.append(build_error_row(row, "Missing both Mana Pool API price and TCG fallback price", source_columns))
             continue
 
         forced_min = chosen_manapool_base < settings.manapool_min_price
@@ -749,6 +779,8 @@ def process_files(
 
         if direct_listing_price is None or direct_net is None:
             destination = "manapool"
+            bump_exceeded = True
+            direct_bump_exceeded_count += 1
             reason_parts.append("Required Direct Price not found")
         else:
             direct_bump_pct = calculate_direct_bump_pct(base_direct_price, direct_listing_price)
@@ -810,14 +842,8 @@ def process_files(
                 }
             )
 
-    manapool_full_df = pd.DataFrame(
-        manapool_rows,
-        columns=DISPLAY_COLUMNS_MANAPOOL + ["_forced_min", "_bump_exceeded"],
-    )
-    direct_full_df = pd.DataFrame(
-        direct_rows,
-        columns=DISPLAY_COLUMNS_DIRECT + ["_bump_exceeded"],
-    )
+    manapool_full_df = pd.DataFrame(manapool_rows, columns=DISPLAY_COLUMNS_MANAPOOL + ["_forced_min", "_bump_exceeded"])
+    direct_full_df = pd.DataFrame(direct_rows, columns=DISPLAY_COLUMNS_DIRECT + ["_bump_exceeded"])
     errors_df = pd.DataFrame(error_rows)
 
     manapool_preview_df = sort_preview(manapool_full_df, DISPLAY_COLUMNS_MANAPOOL)
@@ -855,7 +881,7 @@ def process_files(
         "missing_price_data_count": missing_price_data_count,
         "forced_manapool_min_count": forced_manapool_min_count,
         "direct_bump_exceeded_count": direct_bump_exceeded_count,
-        "manapool_public_price_count": manapool_public_price_count,
+        "manapool_api_price_count": manapool_api_price_count,
         "manapool_fallback_price_count": manapool_fallback_price_count,
         "tracked_shipping_review_count": tracked_shipping_review_count,
     }
