@@ -31,6 +31,13 @@ def get_manapool_api_key() -> str | None:
     return secret_key or os.getenv("MANAPOOL_API_KEY")
 
 
+def get_manapool_email() -> str | None:
+    secret_email = None
+    if hasattr(st, "secrets"):
+        secret_email = st.secrets.get("MANAPOOL_EMAIL")
+    return secret_email or os.getenv("MANAPOOL_EMAIL")
+
+
 def require_password_if_needed() -> None:
     configured_password = get_configured_password()
     if not configured_password:
@@ -212,12 +219,16 @@ def main() -> None:
 
     settings = build_settings()
     manapool_api_key = get_manapool_api_key()
+    manapool_email = get_manapool_email()
 
     st.title("Card Marketplace Listing Optimizer")
     st.caption("Compare TCGPlayer Direct vs Manapool and generate optimized listing sheets.")
     st.info("TCGPlayer Direct fees are now built into the app: under $2.50 the net is 50% of item value, and at $2.50 or higher the fee model is $1.12 + 8.95% + 2.5%.")
     if manapool_api_key:
-        st.success("Mana Pool API connected. Manapool pricing will use live Mana Pool floor data when matches are found.")
+        if manapool_email:
+            st.success("Mana Pool API credentials detected. Manapool pricing will use live Mana Pool floor data when matches are found.")
+        else:
+            st.warning("Mana Pool API token detected, but no Mana Pool email was found. Some Mana Pool endpoints may require both email and token.")
     else:
         st.info("Mana Pool API key not found, so Manapool pricing will fall back to TCG-based pricing.")
 
@@ -236,6 +247,7 @@ def main() -> None:
                 tcgplayer_bytes=tcgplayer_file.getvalue(),
                 settings=settings,
                 manapool_api_key=manapool_api_key,
+                manapool_email=manapool_email,
             )
             workbook_bytes = build_workbook(result)
             st.session_state["optimizer_result"] = pickle.dumps(result)
