@@ -11,7 +11,7 @@ from pricing_logic import OptimizerSettings, process_files
 from workbook_writer import build_workbook
 
 
-APP_VERSION = "0.9"
+APP_VERSION = "1.0"
 
 st.set_page_config(
     page_title="Card Marketplace Listing Optimizer",
@@ -203,7 +203,7 @@ def render_manual_resolution_panel(
         return
 
     st.subheader("Resolve Mana Pool Matches")
-    st.caption("These rows had Mana Pool candidates by card name, but not a confident exact set and number match. The dropdown is now deduped and strongly prefers exact same-set same-number printings before showing broader alternatives.")
+    st.caption("These rows had Mana Pool candidates by card name, but not a confident exact set and number match. The dropdown now uses Mana Pool's Near Mint pricing for nonfoils and Near Mint Foil pricing only when the row condition says foil, while strongly preferring exact same-set same-number printings.")
 
     current_overrides = st.session_state.get("optimizer_match_overrides", {})
     with st.form("manapool_match_override_form"):
@@ -310,13 +310,13 @@ def main() -> None:
     st.title("Card Marketplace Listing Optimizer")
     st.caption(f"Compare TCGPlayer Direct vs Manapool and generate optimized listing sheets. App version {APP_VERSION}.")
     st.info("TCGPlayer Direct fees are built into the app: under $2.50 the net is 50% of item value, and at $2.50 or higher the fee model is $1.12 + 8.95% + 2.5%.")
-    st.success("Mana Pool pricing uses the official Mana Pool API /card_info endpoint for direct matches. Unresolved rows now use deduped variant-price candidates and strongly prefer exact same-set same-number printings before showing broader alternatives.")
+    st.success("Mana Pool pricing now assumes Near Mint nonfoil by default, and only uses Near Mint Foil pricing when the TCGPlayer condition says foil. Unresolved rows strongly prefer exact same-set same-number printings before showing broader alternatives.")
 
     with st.expander("Mana Pool Credential Diagnostics"):
         diagnostics_df = pd.DataFrame(
             [
                 {"Check": "App version", "Status": APP_VERSION},
-                {"Check": "Mana Pool lookup mode", "Status": "Official API /card_info + refined /prices/variants"},
+                {"Check": "Mana Pool lookup mode", "Status": "Official API /card_info + NM singles pricing"},
                 {"Check": "Mana Pool email loaded", "Status": "Yes" if bool(manapool_email) else "No"},
                 {"Check": "Mana Pool email looks like an email", "Status": "Yes" if bool(manapool_email and "@" in manapool_email) else "No"},
                 {"Check": "Mana Pool API token loaded", "Status": "Yes" if bool(manapool_api_key) else "No"},
