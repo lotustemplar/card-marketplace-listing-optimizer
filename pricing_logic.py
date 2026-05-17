@@ -380,7 +380,7 @@ def find_json_schema(content_block: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def discover_manapool_card_lookup(api_key: str, manapool_email: str | None = None) -> tuple[str, str, dict[str, str], dict[str, str]]:
+def discover_manapool_card_lookup() -> tuple[str, str, str, list[dict[str, Any]], list[dict[str, Any]]]:
     spec = fetch_json(MANAPOOL_OPENAPI_URL)
     servers = spec.get("servers") or [{"url": MANAPOOL_DEFAULT_BASE_URL}]
     base_url = servers[0].get("url", MANAPOOL_DEFAULT_BASE_URL)
@@ -413,48 +413,67 @@ def discover_manapool_card_lookup(api_key: str, manapool_email: str | None = Non
             if not matched_response_schema:
                 continue
 
-            headers, query_auth = build_auth_headers(spec, operation, security_schemes, api_key, manapool_email)
-            return base_url, path, headers, query_auth
+            operation_security = operation.get("security", spec.get("security", []))
+            return base_url, path, method.upper(), operation_security, security_schemes
 
     raise ValueError("Unable to locate Mana Pool card lookup endpoint in the OpenAPI spec.")
 
 
-def build_auth_headers(
-    spec: dict[str, Any],
-    operation: dict[str, Any],
+def build_auth_attempts(
+    operation_security: list[dict[str, Any]],
     security_schemes: dict[str, Any],
     api_key: str,
     manapool_email: str | None = None,
-) -> tuple[dict[str, str], dict[str, str]]:
-    headers = {"Accept": "application/json", "Content-Type": "application/json"}
-    query_params: dict[str, str] = {}
-    security_requirements = operation.get("security", spec.get("security", []))
+) -> list[tuple[dict[str, str], dict[str, str], str]]:
+    base_headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    attempts: list[tuple[dict[str, str], dict[str, str], str]] = []
+    seen: set[tuple[tuple[str, str], tuple[str, str]]] = set()
+
+    def add_attempt(headers: dict[str, str], query: dict[str, str], label: str) -> None:
+        header_key = tuple(sorted(headers.items()))
+        query_key = tuple(sorted(query.items()))
+        dedupe_key = (header_key, query_key)
+        if dedupe_key in seen:
+            return
+        seen.add(dedupe_key)
+        attempts.append((headers, query, label))
 
     if manapool_email:
-        credentials = f"{manapool_email}:{api_key}".encode("utf-8")
-        headers["Authorization"] = f"Basic {base64.b64encode(credentials).decode('ascii')}"
-        return headers, query_params
+        basic_value = base64.b64encode(f"{manapool_email}:{api_key}".encode("utf-8")).decode("ascii")
+        add_attempt({**base_headers, "Authorization": f"Basic {basic_value}"}, {}, "basic-email-token")
+        add_attempt({**base_headers, "X-User-Email": manapool_email, "X-API-Key": api_key}, {}, "x-user-email-x-api-key")
+        add_attempt({**base_headers, "X-User-Email": manapool_email, "Authorization": f"Bearer {api_key}"}, {}, "x-user-email-bearer")
+        add_attempt({**base_headers, "email": manapool_email, "Authorization": f"Bearer {api_key}"}, {}, "email-bearer")
+        add_attempt({**base_headers, "email": manapool_email, "X-API-Key": api_key}, {}, "email-x-api-key")
 
-    for security_requirement in security_requirements:
+    for security_requirement in operation_security:
         for scheme_name in security_requirement.keys():
             scheme = security_schemes.get(scheme_name, {})
             scheme_type = scheme.get("type")
-            if scheme_type == "http" and scheme.get("scheme", "").lower() == "bearer":
-                headers["Authorization"] = f"Bearer {api_key}"
-                return headers, query_params
-            if scheme_type == "apiKey":
+            if scheme_type == "http":
+                auth_scheme = scheme.get("scheme", "").lower()
+                if auth_scheme == "bearer":
+                    add_attempt({**base_headers, "Authorization": f"Bearer {api_key}"}, {}, "openapi-bearer")
+                elif auth_scheme == "basic" and manapool_email:
+                    basic_value = base64.b64encode(f"{manapool_email}:{api_key}".encode("utf-8")).decode("ascii")
+                    add_attempt({**base_headers, "Authorization": f"Basic {basic_value}"}, {}, "openapi-basic")
+            elif scheme_type == "apiKey":
                 location = scheme.get("in")
                 parameter_name = scheme.get("name", "X-API-Key")
                 if location == "header":
-                    headers[parameter_name] = api_key
-                    return headers, query_params
-                if location == "query":
-                    query_params[parameter_name] = api_key
-                    return headers, query_params
+                    add_attempt({**base_headers, parameter_name: api_key}, {}, f"openapi-header-{parameter_name}")
+                elif location == "query":
+                    add_attempt(base_headers.copy(), {parameter_name: api_key}, f"openapi-query-{parameter_name}")
 
-    headers["Authorization"] = f"Bearer {api_key}"
-    headers["X-API-Key"] = api_key
-    return headers, query_params
+    add_attempt({**base_headers, "Authorization": f"Bearer {api_key}"}, {}, "fallback-bearer")
+    add_attempt({**base_headers, "X-API-Key": api_key}, {}, "fallback-x-api-key")
+    add_attempt({**base_headers, "Authorization": f"Token {api_key}"}, {}, "fallback-token")
+    add_attempt({**base_headers, "Authorization": f"Api-Key {api_key}"}, {}, "fallback-api-key")
+    add_attempt({**base_headers, "api-key": api_key}, {}, "fallback-lower-api-key")
+    add_attempt(base_headers.copy(), {"api_key": api_key}, "fallback-query-api_key")
+    add_attempt(base_headers.copy(), {"token": api_key}, "fallback-query-token")
+
+    return attempts
 
 
 def fetch_json(
@@ -476,6 +495,25 @@ def fetch_json(
         raise ValueError(f"Mana Pool API request failed ({exc.code}): {response_body[:300]}") from exc
     except error.URLError as exc:
         raise ValueError(f"Mana Pool API request failed: {exc.reason}") from exc
+
+
+def fetch_json_with_attempts(
+    url: str,
+    *,
+    method: str,
+    auth_attempts: list[tuple[dict[str, str], dict[str, str], str]],
+    payload: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], str]:
+    last_error: Exception | None = None
+    for headers, query_params, label in auth_attempts:
+        request_url = url
+        if query_params:
+            request_url = f"{url}?{parse.urlencode(query_params)}"
+        try:
+            return fetch_json(request_url, method=method, headers=headers, payload=payload), label
+        except Exception as exc:
+            last_error = exc
+    raise ValueError(str(last_error) if last_error else "Mana Pool API authentication failed.")
 
 
 def chunked(values: list[str], size: int) -> list[list[str]]:
@@ -527,20 +565,21 @@ def load_manapool_price_lookup(
         return {}, {}, None
 
     try:
-        base_url, path, headers, query_auth = discover_manapool_card_lookup(manapool_api_key, manapool_email)
+        base_url, path, method, operation_security, security_schemes = discover_manapool_card_lookup()
         endpoint_url = parse.urljoin(base_url.rstrip("/") + "/", path.lstrip("/"))
+        auth_attempts = build_auth_attempts(operation_security, security_schemes, manapool_api_key, manapool_email)
         cards_by_name: dict[str, list[dict[str, Any]]] = {}
+        successful_auth_label = None
 
         for name_batch in chunked(unique_names, 100):
-            request_url = endpoint_url
-            if query_auth:
-                request_url = f"{endpoint_url}?{parse.urlencode(query_auth)}"
-            response = fetch_json(
-                request_url,
-                method="POST",
-                headers=headers,
+            response, used_auth_label = fetch_json_with_attempts(
+                endpoint_url,
+                method=method,
+                auth_attempts=auth_attempts,
                 payload={"card_names": name_batch},
             )
+            if successful_auth_label is None:
+                successful_auth_label = used_auth_label
             for card in response.get("cards", []):
                 if int(card.get("quantity_available") or 0) <= 0:
                     continue
@@ -571,7 +610,11 @@ def load_manapool_price_lookup(
                 source_lookup[row_key] = "Mana Pool API floor (set match)"
             else:
                 source_lookup[row_key] = "Mana Pool API floor (best available name match)"
-        return price_lookup, source_lookup, None
+
+        warning = None
+        if successful_auth_label:
+            warning = f"Mana Pool API connected using auth mode: {successful_auth_label}."
+        return price_lookup, source_lookup, warning
     except Exception as exc:
         return {}, {}, f"Mana Pool API lookup unavailable, so TCG fallback pricing was used instead. Details: {exc}"
 
