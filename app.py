@@ -24,6 +24,13 @@ def get_configured_password() -> str | None:
     return secret_password or os.getenv("APP_PASSWORD")
 
 
+def get_manapool_api_key() -> str | None:
+    secret_key = None
+    if hasattr(st, "secrets"):
+        secret_key = st.secrets.get("MANAPOOL_API_KEY")
+    return secret_key or os.getenv("MANAPOOL_API_KEY")
+
+
 def require_password_if_needed() -> None:
     configured_password = get_configured_password()
     if not configured_password:
@@ -204,10 +211,15 @@ def main() -> None:
     )
 
     settings = build_settings()
+    manapool_api_key = get_manapool_api_key()
 
     st.title("Card Marketplace Listing Optimizer")
     st.caption("Compare TCGPlayer Direct vs Manapool and generate optimized listing sheets.")
     st.info("TCGPlayer Direct fees are now built into the app: under $2.50 the net is 50% of item value, and at $2.50 or higher the fee model is $1.12 + 8.95% + 2.5%.")
+    if manapool_api_key:
+        st.success("Mana Pool API connected. Manapool pricing will use live Mana Pool floor data when matches are found.")
+    else:
+        st.info("Mana Pool API key not found, so Manapool pricing will fall back to TCG-based pricing.")
 
     st.markdown('<div class="upload-panel">', unsafe_allow_html=True)
     tcgplayer_file = st.file_uploader("Upload TCGPlayer CSV export", type=["csv"])
@@ -223,6 +235,7 @@ def main() -> None:
             result = process_files(
                 tcgplayer_bytes=tcgplayer_file.getvalue(),
                 settings=settings,
+                manapool_api_key=manapool_api_key,
             )
             workbook_bytes = build_workbook(result)
             st.session_state["optimizer_result"] = pickle.dumps(result)
