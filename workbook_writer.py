@@ -14,7 +14,6 @@ HEADER_FILL = PatternFill(fill_type="solid", fgColor="0F4C5C")
 HEADER_FONT = Font(color="FFFFFF", bold=True)
 FORCED_MIN_FILL = PatternFill(fill_type="solid", fgColor="FFF3BF")
 ALERT_FILL = PatternFill(fill_type="solid", fgColor="F8D7DA")
-CLIFF_FILL = PatternFill(fill_type="solid", fgColor="FFE8CC")
 
 CURRENCY_COLUMNS = {
     "Manapool Sheet": {"Manapool Price", "Manapool Net", "Base Direct Price", "Base Direct Net", "Required Direct Price"},
@@ -99,9 +98,6 @@ def highlight_special_rows(ws, dataframe: pd.DataFrame) -> None:
         price_col = header_index.get("Manapool Price")
         bump_col = header_index.get("Direct Bump %")
         for row_idx, row in enumerate(dataframe.to_dict("records"), start=2):
-            if row.get("_cliff_affected"):
-                for col_idx in range(1, ws.max_column + 1):
-                    ws.cell(row=row_idx, column=col_idx).fill = CLIFF_FILL
             if row.get("_forced_min") and price_col:
                 ws.cell(row=row_idx, column=price_col).fill = FORCED_MIN_FILL
             if row.get("_bump_exceeded") and bump_col:
@@ -110,9 +106,6 @@ def highlight_special_rows(ws, dataframe: pd.DataFrame) -> None:
     if ws.title == "TCGPlayer Direct Sheet":
         bump_col = header_index.get("Direct Bump %")
         for row_idx, row in enumerate(dataframe.to_dict("records"), start=2):
-            if row.get("_cliff_affected"):
-                for col_idx in range(1, ws.max_column + 1):
-                    ws.cell(row=row_idx, column=col_idx).fill = CLIFF_FILL
             if row.get("_bump_exceeded") and bump_col:
                 ws.cell(row=row_idx, column=bump_col).fill = ALERT_FILL
 
