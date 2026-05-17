@@ -7,11 +7,11 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
-from pricing_logic import OptimizerSettings, process_files
+from pricing_logic_bulk import OptimizerSettings, process_files
 from workbook_writer import build_workbook
 
 
-APP_VERSION = "0.2"
+APP_VERSION = "0.3"
 
 st.set_page_config(
     page_title="Card Marketplace Listing Optimizer",
@@ -226,13 +226,14 @@ def main() -> None:
     st.title("Card Marketplace Listing Optimizer")
     st.caption(f"Compare TCGPlayer Direct vs Manapool and generate optimized listing sheets. App version {APP_VERSION}.")
     st.info("TCGPlayer Direct fees are now built into the app: under $2.50 the net is 50% of item value, and at $2.50 or higher the fee model is $1.12 + 8.95% + 2.5%.")
-    st.success("Mana Pool pricing now uses public exact-card pages when a set/card-number match can be resolved, with TCG fallback pricing for misses.")
+    st.success("Mana Pool pricing now uses cached Scryfall bulk metadata to resolve exact card pages before reading the live public Mana Pool floor, with TCG fallback pricing for misses.")
 
     with st.expander("Mana Pool Credential Diagnostics"):
         diagnostics_df = pd.DataFrame(
             [
                 {"Check": "App version", "Status": APP_VERSION},
                 {"Check": "Mana Pool lookup mode", "Status": "Public card pages"},
+                {"Check": "Card metadata source", "Status": "Cached Scryfall bulk data"},
                 {"Check": "Mana Pool email loaded", "Status": "Yes" if bool(manapool_email) else "No"},
                 {"Check": "Mana Pool API token loaded", "Status": "Yes" if bool(manapool_api_key) else "No"},
                 {"Check": "Mana Pool API credentials currently required", "Status": "No"},
