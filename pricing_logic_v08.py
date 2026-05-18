@@ -606,6 +606,8 @@ def build_analysis_dataframe(summary: dict[str, Any], settings: OptimizerSetting
         {"Metric": "Total estimated Manapool net", "Value": round(summary["total_estimated_manapool_net"], 2)},
         {"Metric": "Total estimated Direct net", "Value": round(summary["total_estimated_direct_net"], 2)},
         {"Metric": "Combined estimated net", "Value": round(summary["combined_estimated_net"], 2)},
+        {"Metric": "Hypothetical net if everything went to Mana Pool", "Value": round(summary["all_manapool_estimated_net"], 2)},
+        {"Metric": "Hypothetical net if everything went to TCGPlayer Direct", "Value": round(summary["all_direct_estimated_net"], 2)},
         {"Metric": "Average Direct bump %", "Value": summary["average_direct_bump_pct"]},
         {"Metric": "Number of skipped/error rows", "Value": summary["skipped_error_rows"]},
         {"Metric": "Number of cards with missing price data", "Value": summary["missing_price_data_count"]},
@@ -662,6 +664,8 @@ def process_files(
             "total_estimated_manapool_net": 0.0,
             "total_estimated_direct_net": 0.0,
             "combined_estimated_net": 0.0,
+            "all_manapool_estimated_net": 0.0,
+            "all_direct_estimated_net": 0.0,
             "average_direct_bump_pct": 0.0,
             "skipped_error_rows": int(len(tcg_df)),
             "missing_price_data_count": 0,
@@ -710,6 +714,8 @@ def process_files(
     direct_bump_exceeded_count = 0
     manapool_api_price_count = 0
     manapool_fallback_price_count = 0
+    all_manapool_estimated_net = 0.0
+    all_direct_estimated_net = 0.0
 
     for _, row in tcg_df.iterrows():
         row_errors: list[str] = []
@@ -784,6 +790,7 @@ def process_files(
             forced_manapool_min_count += 1
 
         manapool_net = calculate_manapool_net(manapool_price, settings)
+        all_manapool_estimated_net += manapool_net * quantity
 
         if direct_low is None:
             base_direct_price = market_price
@@ -793,6 +800,8 @@ def process_files(
             base_direct_price = max(market_price, direct_low)
 
         base_direct_net = lookup_direct_net(base_direct_price)
+        if base_direct_net is not None:
+            all_direct_estimated_net += base_direct_net * quantity
         required_direct_price = find_required_direct_price(manapool_net)
         if base_direct_price is not None and base_direct_net is not None and base_direct_net >= manapool_net:
             required_direct_price = round(base_direct_price, 2)
@@ -905,6 +914,8 @@ def process_files(
         "total_estimated_manapool_net": round(manapool_total_net, 2),
         "total_estimated_direct_net": round(direct_total_net, 2),
         "combined_estimated_net": round(manapool_total_net + direct_total_net, 2),
+        "all_manapool_estimated_net": round(all_manapool_estimated_net, 2),
+        "all_direct_estimated_net": round(all_direct_estimated_net, 2),
         "average_direct_bump_pct": direct_bump_average,
         "skipped_error_rows": int(len(errors_df)),
         "missing_price_data_count": missing_price_data_count,
