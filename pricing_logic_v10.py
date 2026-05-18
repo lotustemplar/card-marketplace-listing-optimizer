@@ -8,9 +8,12 @@ import pricing_logic_v08 as base
 from pricing_logic_v08 import *  # noqa: F401,F403
 
 
-USER_AGENT = "CardMarketplaceListingOptimizer/1.1 (+https://github.com/lotustemplar/card-marketplace-listing-optimizer)"
+USER_AGENT = "CardMarketplaceListingOptimizer/1.3 (+https://github.com/lotustemplar/card-marketplace-listing-optimizer)"
 base.USER_AGENT = USER_AGENT
 MANAPOOL_SINGLES_PRICES_ENDPOINT = "prices/singles"
+SET_NAME_CODE_ALIASES = {
+    "the list reprints": {"plst"},
+}
 
 
 def _normalize_set_code(value: Any) -> str:
@@ -19,6 +22,10 @@ def _normalize_set_code(value: Any) -> str:
 
 def _row_is_foil(condition_text: str) -> bool:
     return "foil" in base.safe_text(condition_text).lower()
+
+
+def _alias_set_codes(set_name: str) -> set[str]:
+    return set(SET_NAME_CODE_ALIASES.get(base.normalize_header(set_name), set()))
 
 
 def _relevant_nm_price(candidate: dict[str, Any], is_foil: bool) -> float | None:
@@ -95,6 +102,7 @@ def fetch_manapool_singles_candidates(
 def _infer_target_set_codes(card_info_candidates: list[dict[str, Any]], set_name: str, card_number: str) -> set[str]:
     normalized_set_name = base.normalize_header(set_name)
     normalized_number = base.normalize_identifier(card_number)
+    alias_codes = _alias_set_codes(set_name)
     codes = {
         _normalize_set_code(candidate.get("set_code", ""))
         for candidate in card_info_candidates
@@ -103,13 +111,14 @@ def _infer_target_set_codes(card_info_candidates: list[dict[str, Any]], set_name
         and _normalize_set_code(candidate.get("set_code", ""))
     }
     if codes:
-        return codes
-    return {
+        return codes | alias_codes
+    fallback_codes = {
         _normalize_set_code(candidate.get("set_code", ""))
         for candidate in card_info_candidates
         if base.normalize_header(candidate.get("set_name", "")) == normalized_set_name
         and _normalize_set_code(candidate.get("set_code", ""))
     }
+    return fallback_codes | alias_codes
 
 
 def load_manapool_price_lookup(
