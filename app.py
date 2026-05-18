@@ -11,7 +11,7 @@ from pricing_logic import OptimizerSettings, process_files
 from workbook_writer import build_workbook
 
 
-APP_VERSION = "1.2"
+APP_VERSION = "1.3"
 
 st.set_page_config(
     page_title="Card Marketplace Listing Optimizer",
@@ -345,7 +345,7 @@ def main() -> None:
     st.title("Card Marketplace Listing Optimizer")
     st.caption(f"Compare TCGPlayer Direct vs Manapool and generate optimized listing sheets. App version {APP_VERSION}.")
     st.info("TCGPlayer Direct fees are built into the app: under $2.50 the net is 50% of item value, and at $2.50 or higher the fee model is $1.12 + 8.95% + 2.5%.")
-    st.success("Mana Pool pricing now assumes Near Mint nonfoil by default, and only uses Near Mint Foil pricing when the TCGPlayer condition says foil. If a row still has exactly one real Mana Pool option at render time, the app now auto-applies it before showing manual review.")
+    st.success("Mana Pool pricing now assumes Near Mint nonfoil by default, uses Near Mint Foil pricing only when the TCGPlayer condition says foil, and treats The List Reprints as PLST during set matching.")
 
     with st.expander("Mana Pool Credential Diagnostics"):
         diagnostics_df = pd.DataFrame(
