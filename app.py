@@ -11,7 +11,7 @@ from pricing_logic import OptimizerSettings, process_files
 from workbook_writer import build_workbook
 
 
-APP_VERSION = "1.3"
+APP_VERSION = "1.4"
 
 st.set_page_config(
     page_title="Card Marketplace Listing Optimizer",
@@ -137,6 +137,10 @@ def render_summary(result) -> None:
     metric_six.metric("Estimated Direct Net", f"${summary['total_estimated_direct_net']:.2f}")
     metric_seven.metric("Combined Estimated Net", f"${summary['combined_estimated_net']:.2f}")
     metric_eight.metric("Skipped/Error Rows", summary["skipped_error_rows"])
+
+    metric_nine, metric_ten = st.columns(2)
+    metric_nine.metric("If Everything Went to Mana Pool", f"${summary['all_manapool_estimated_net']:.2f}")
+    metric_ten.metric("If Everything Went to Direct", f"${summary['all_direct_estimated_net']:.2f}")
 
     st.dataframe(result.analysis_df, width="stretch", hide_index=True)
 
