@@ -11,7 +11,7 @@ from pricing_logic import OptimizerSettings, process_files
 from workbook_writer import build_workbook
 
 
-APP_VERSION = "1.0"
+APP_VERSION = "1.1"
 
 st.set_page_config(
     page_title="Card Marketplace Listing Optimizer",
@@ -203,7 +203,7 @@ def render_manual_resolution_panel(
         return
 
     st.subheader("Resolve Mana Pool Matches")
-    st.caption("These rows had Mana Pool candidates by card name, but not a confident exact set and number match. The dropdown now uses Mana Pool's Near Mint pricing for nonfoils and Near Mint Foil pricing only when the row condition says foil, while strongly preferring exact same-set same-number printings.")
+    st.caption("These rows only appear here when more than one filtered Mana Pool option still remains. If the app narrows a row down to one valid option, it now auto-selects it instead of sending it to manual review.")
 
     current_overrides = st.session_state.get("optimizer_match_overrides", {})
     with st.form("manapool_match_override_form"):
@@ -310,7 +310,7 @@ def main() -> None:
     st.title("Card Marketplace Listing Optimizer")
     st.caption(f"Compare TCGPlayer Direct vs Manapool and generate optimized listing sheets. App version {APP_VERSION}.")
     st.info("TCGPlayer Direct fees are built into the app: under $2.50 the net is 50% of item value, and at $2.50 or higher the fee model is $1.12 + 8.95% + 2.5%.")
-    st.success("Mana Pool pricing now assumes Near Mint nonfoil by default, and only uses Near Mint Foil pricing when the TCGPlayer condition says foil. Unresolved rows strongly prefer exact same-set same-number printings before showing broader alternatives.")
+    st.success("Mana Pool pricing now assumes Near Mint nonfoil by default, and only uses Near Mint Foil pricing when the TCGPlayer condition says foil. If filtering leaves only one valid Mana Pool match, the app now auto-selects it instead of sending it to manual review.")
 
     with st.expander("Mana Pool Credential Diagnostics"):
         diagnostics_df = pd.DataFrame(
