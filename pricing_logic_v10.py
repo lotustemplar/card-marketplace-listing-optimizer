@@ -8,7 +8,7 @@ import pricing_logic_v08 as base
 from pricing_logic_v08 import *  # noqa: F401,F403
 
 
-USER_AGENT = "CardMarketplaceListingOptimizer/1.0 (+https://github.com/lotustemplar/card-marketplace-listing-optimizer)"
+USER_AGENT = "CardMarketplaceListingOptimizer/1.1 (+https://github.com/lotustemplar/card-marketplace-listing-optimizer)"
 base.USER_AGENT = USER_AGENT
 MANAPOOL_SINGLES_PRICES_ENDPOINT = "prices/singles"
 
@@ -229,6 +229,14 @@ def load_manapool_price_lookup(
                 continue
             seen_labels.add(option["label"])
             options.append(option)
+
+        if len(options) == 1:
+            chosen_option = options[0]
+            chosen_price, parse_error = base.try_parse_number(chosen_option.get("price"))
+            if parse_error is None and chosen_price is not None:
+                price_lookup[row_tuple] = round(chosen_price, 2)
+                source_lookup[row_tuple] = chosen_option.get("reason", "Mana Pool single-option auto match")
+                continue
 
         if options:
             unresolved_options.append(
