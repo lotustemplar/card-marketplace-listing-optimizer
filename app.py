@@ -11,7 +11,7 @@ from pricing_logic import OptimizerSettings, process_files
 from workbook_writer import build_workbook
 
 
-APP_VERSION = "1.1"
+APP_VERSION = "1.2"
 
 st.set_page_config(
     page_title="Card Marketplace Listing Optimizer",
@@ -202,12 +202,46 @@ def render_manual_resolution_panel(
     if not unresolved_options:
         return
 
-    st.subheader("Resolve Mana Pool Matches")
-    st.caption("These rows only appear here when more than one filtered Mana Pool option still remains. If the app narrows a row down to one valid option, it now auto-selects it instead of sending it to manual review.")
+    current_overrides = dict(st.session_state.get("optimizer_match_overrides", {}))
+    auto_overrides_added = False
 
-    current_overrides = st.session_state.get("optimizer_match_overrides", {})
+    for item in unresolved_options:
+        if len(item["options"]) != 1:
+            continue
+        selected_option = item["options"][0]
+        existing_override = current_overrides.get(item["row_key"])
+        if existing_override and existing_override.get("label") == selected_option["label"]:
+            continue
+        current_overrides[item["row_key"]] = {
+            "price": selected_option["price"],
+            "label": selected_option["label"],
+            "reason": selected_option.get("reason", f"Mana Pool single-option auto override: {selected_option['label']}"),
+        }
+        auto_overrides_added = True
+
+    if auto_overrides_added:
+        source_bytes = st.session_state.get("optimizer_source_bytes")
+        if not source_bytes:
+            st.error("The original TCGPlayer CSV is no longer in session. Please upload it again and regenerate.")
+            return
+        run_optimizer(
+            tcgplayer_bytes=source_bytes,
+            settings=settings,
+            manapool_api_key=manapool_api_key,
+            manapool_email=manapool_email,
+            match_overrides=current_overrides,
+        )
+        st.rerun()
+
+    remaining_unresolved = [item for item in unresolved_options if len(item["options"]) > 1]
+    if not remaining_unresolved:
+        return
+
+    st.subheader("Resolve Mana Pool Matches")
+    st.caption("These rows only appear here when more than one real Mana Pool option still remains after filtering. If the app narrows a row down to one valid option, it auto-applies it before showing manual review.")
+
     with st.form("manapool_match_override_form"):
-        for item in unresolved_options:
+        for item in remaining_unresolved:
             st.markdown(f"**{item['product_name']}** | {item['set_name']} | #{item['number'] or '?'}")
             labels = ["Use TCG fallback"] + [option["label"] for option in item["options"]]
             default_label = "Use TCG fallback"
@@ -225,10 +259,11 @@ def render_manual_resolution_panel(
         submitted = st.form_submit_button("Apply Mana Pool Match Overrides")
 
     if submitted:
-        match_overrides: dict[str, dict[str, object]] = {}
-        for item in unresolved_options:
+        match_overrides: dict[str, dict[str, object]] = dict(current_overrides)
+        for item in remaining_unresolved:
             selected_label = st.session_state.get(f"override_select_{item['row_key']}", "Use TCG fallback")
             if selected_label == "Use TCG fallback":
+                match_overrides.pop(item["row_key"], None)
                 continue
             selected_option = next((option for option in item["options"] if option["label"] == selected_label), None)
             if not selected_option:
@@ -310,7 +345,7 @@ def main() -> None:
     st.title("Card Marketplace Listing Optimizer")
     st.caption(f"Compare TCGPlayer Direct vs Manapool and generate optimized listing sheets. App version {APP_VERSION}.")
     st.info("TCGPlayer Direct fees are built into the app: under $2.50 the net is 50% of item value, and at $2.50 or higher the fee model is $1.12 + 8.95% + 2.5%.")
-    st.success("Mana Pool pricing now assumes Near Mint nonfoil by default, and only uses Near Mint Foil pricing when the TCGPlayer condition says foil. If filtering leaves only one valid Mana Pool match, the app now auto-selects it instead of sending it to manual review.")
+    st.success("Mana Pool pricing now assumes Near Mint nonfoil by default, and only uses Near Mint Foil pricing when the TCGPlayer condition says foil. If a row still has exactly one real Mana Pool option at render time, the app now auto-applies it before showing manual review.")
 
     with st.expander("Mana Pool Credential Diagnostics"):
         diagnostics_df = pd.DataFrame(
