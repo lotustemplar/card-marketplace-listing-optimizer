@@ -7,16 +7,121 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
-from pricing_logic import OptimizerSettings, process_files
+from pricing_logic import OptimizerSettings, process_files, try_parse_number
 from workbook_writer import build_workbook
 
 
-APP_VERSION = "1.4"
+APP_VERSION = "1.5"
+MANABOX_COLUMN_ALIASES = {
+    "purchase_price": ["purchase price", "purchase_price", "purchaseprice"],
+    "card_name": ["card name", "card_name", "name"],
+    "set_code": ["set code", "set_code", "setcode"],
+    "set_name": ["set name", "set_name", "setname"],
+    "card_number": ["card number", "card_number", "cardnumber", "number"],
+    "quantity": ["quantity", "qty"],
+}
 
 st.set_page_config(
     page_title="Card Marketplace Listing Optimizer",
     layout="wide",
 )
+
+
+def normalize_header(value: str) -> str:
+    text = "" if value is None else str(value).strip().lower()
+    compact = []
+    last_space = False
+    for char in text:
+        if char.isalnum():
+            compact.append(char)
+            last_space = False
+        elif not last_space:
+            compact.append(" ")
+            last_space = True
+    return "".join(compact).strip()
+
+
+def load_csv_dataframe(file_bytes: bytes) -> pd.DataFrame:
+    encodings = ["utf-8-sig", "utf-8", "cp1252", "latin-1"]
+    last_error: Exception | None = None
+    for encoding in encodings:
+        try:
+            dataframe = pd.read_csv(pd.io.common.BytesIO(file_bytes), dtype=str, keep_default_na=False, encoding=encoding)
+            dataframe.columns = [str(column).strip() for column in dataframe.columns]
+            return dataframe
+        except Exception as exc:
+            last_error = exc
+    raise ValueError(f"Unable to read CSV file: {last_error}") from last_error
+
+
+def map_manabox_columns(dataframe: pd.DataFrame) -> dict[str, str]:
+    normalized_lookup = {normalize_header(column): column for column in dataframe.columns}
+    mapped: dict[str, str] = {}
+    for canonical, aliases in MANABOX_COLUMN_ALIASES.items():
+        for alias in aliases:
+            if alias in normalized_lookup:
+                mapped[canonical] = normalized_lookup[alias]
+                break
+    return mapped
+
+
+def run_low_price_inspection(file_bytes: bytes, threshold: float) -> None:
+    dataframe = load_csv_dataframe(file_bytes)
+    column_map = map_manabox_columns(dataframe)
+    price_column = column_map.get("purchase_price")
+    if not price_column:
+        raise ValueError("Could not find a ManaBox 'Purchase price' column in the uploaded CSV.")
+
+    low_rows: list[dict[str, object]] = []
+    keep_mask: list[bool] = []
+    invalid_price_count = 0
+
+    card_name_column = column_map.get("card_name")
+    set_code_column = column_map.get("set_code")
+    set_name_column = column_map.get("set_name")
+    card_number_column = column_map.get("card_number")
+    quantity_column = column_map.get("quantity")
+
+    for index, (_, row) in enumerate(dataframe.iterrows(), start=1):
+        raw_price = row.get(price_column, "")
+        parsed_price, parse_error = try_parse_number(raw_price)
+        is_low = parse_error is None and parsed_price is not None and parsed_price < threshold
+        if parse_error is not None or parsed_price is None:
+            invalid_price_count += 1
+        keep_mask.append(not is_low)
+        if not is_low:
+            continue
+
+        card_name = row.get(card_name_column, "") if card_name_column else ""
+        set_code = row.get(set_code_column, "") if set_code_column else ""
+        set_name = row.get(set_name_column, "") if set_name_column else ""
+        card_number = row.get(card_number_column, "") if card_number_column else ""
+        quantity = row.get(quantity_column, "") if quantity_column else ""
+
+        low_rows.append(
+            {
+                "Sequence": index,
+                "CSV Row": index + 1,
+                "Card Name": card_name,
+                "Set Code": set_code,
+                "Set Name": set_name,
+                "Card Number": card_number,
+                "Quantity": quantity,
+                "Purchase Price": round(parsed_price, 2) if parsed_price is not None else raw_price,
+            }
+        )
+
+    purged_dataframe = dataframe.loc[keep_mask].reset_index(drop=True)
+    low_rows_df = pd.DataFrame(low_rows)
+    st.session_state["low_price_result"] = pickle.dumps(
+        {
+            "original_dataframe": dataframe,
+            "purged_dataframe": purged_dataframe,
+            "low_rows_df": low_rows_df,
+            "threshold": threshold,
+            "invalid_price_count": invalid_price_count,
+        }
+    )
 
 
 def get_configured_password() -> str | None:
@@ -293,6 +398,59 @@ def render_manual_resolution_panel(
         st.rerun()
 
 
+def render_low_price_inspection_page() -> None:
+    st.title("LOW PRICE INSPECTION")
+    st.caption("Upload a ManaBox CSV, find cards below your cutoff price, and export a purged ManaBox CSV in the same format and order.")
+    st.info("This tool uses the ManaBox 'Purchase price' column and reports each low-priced card in upload sequence order. 'Sequence' starts at the first data row, and 'CSV Row' includes the header row.")
+
+    inspection_file = st.file_uploader("Upload ManaBox CSV", type=["csv"], key="manabox_low_price_file")
+    threshold = st.number_input("Low price cutoff ($)", min_value=0.0, value=0.15, step=0.01, format="%.2f", key="manabox_low_price_threshold")
+    inspect_clicked = st.button("Inspect Low Prices", type="primary", width="stretch", key="inspect_low_prices_button")
+
+    if inspect_clicked:
+        if inspection_file is None:
+            st.error("Please upload a ManaBox CSV export.")
+            return
+        try:
+            run_low_price_inspection(inspection_file.getvalue(), threshold)
+        except Exception as exc:
+            st.error(f"Low price inspection failed: {exc}")
+            return
+
+    stored_result = st.session_state.get("low_price_result")
+    if not stored_result:
+        st.info("Upload your ManaBox CSV and inspect it to see which rows fall below your cutoff price.")
+        return
+
+    result = pickle.loads(stored_result)
+    low_rows_df: pd.DataFrame = result["low_rows_df"]
+    purged_dataframe: pd.DataFrame = result["purged_dataframe"]
+    original_dataframe: pd.DataFrame = result["original_dataframe"]
+    threshold = result["threshold"]
+    invalid_price_count = result["invalid_price_count"]
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M")
+
+    metric_one, metric_two, metric_three, metric_four = st.columns(4)
+    metric_one.metric("Total Rows", len(original_dataframe))
+    metric_two.metric("Rows Below Cutoff", len(low_rows_df))
+    metric_three.metric("Rows Remaining", len(purged_dataframe))
+    metric_four.metric("Rows With Blank/Invalid Price", invalid_price_count)
+
+    if low_rows_df.empty:
+        st.success(f"No ManaBox rows were found below ${threshold:.2f}.")
+    else:
+        st.warning(f"Found {len(low_rows_df)} row(s) below ${threshold:.2f}. These are shown in the same sequence as your upload.")
+        st.dataframe(low_rows_df, width="stretch", hide_index=True)
+
+    st.download_button(
+        "Purge Low Priced Cards and Download ManaBox CSV",
+        data=dataframe_to_plain_csv_bytes(purged_dataframe),
+        file_name=f"manabox_purged_{timestamp}.csv",
+        mime="text/csv",
+        width="stretch",
+    )
+
+
 def main() -> None:
     require_password_if_needed()
 
@@ -342,6 +500,13 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
+    st.sidebar.header("Menu")
+    page_mode = st.sidebar.radio("Choose a tool", ["Listing Optimizer", "LOW PRICE INSPECTION"])
+
+    if page_mode == "LOW PRICE INSPECTION":
+        render_low_price_inspection_page()
+        return
+
     settings = build_settings()
     manapool_api_key = get_manapool_api_key()
     manapool_email = get_manapool_email()
@@ -349,7 +514,7 @@ def main() -> None:
     st.title("Card Marketplace Listing Optimizer")
     st.caption(f"Compare TCGPlayer Direct vs Manapool and generate optimized listing sheets. App version {APP_VERSION}.")
     st.info("TCGPlayer Direct fees are built into the app: under $2.50 the net is 50% of item value, and at $2.50 or higher the fee model is $1.12 + 8.95% + 2.5%.")
-    st.success("Mana Pool pricing now assumes Near Mint nonfoil by default, uses Near Mint Foil pricing only when the TCGPlayer condition says foil, and treats The List Reprints as PLST during set matching.")
+    st.success("Mana Pool pricing now assumes Near Mint nonfoil by default, uses Near Mint Foil pricing only when the TCGPlayer condition says foil, treats The List Reprints as PLST during set matching, and includes hypothetical all-Mana-Pool vs all-Direct net totals for comparison.")
 
     with st.expander("Mana Pool Credential Diagnostics"):
         diagnostics_df = pd.DataFrame(
