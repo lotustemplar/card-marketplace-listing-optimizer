@@ -11,7 +11,7 @@ from pricing_logic import OptimizerSettings, process_files, try_parse_number
 from workbook_writer import build_workbook
 
 
-APP_VERSION = "2.3"
+APP_VERSION = "2.4"
 MANABOX_COLUMN_ALIASES = {
     "purchase_price": ["purchase price", "purchase_price", "purchaseprice"],
     "card_name": ["card name", "card_name", "name"],
@@ -267,6 +267,11 @@ def dataframe_to_plain_csv_bytes(dataframe: pd.DataFrame) -> bytes:
     return csv_text.encode("cp1252", errors="replace")
 
 
+def dataframe_to_utf8_csv_bytes(dataframe: pd.DataFrame) -> bytes:
+    csv_text = dataframe.to_csv(index=False, lineterminator="\r\n")
+    return csv_text.encode("utf-8-sig")
+
+
 def run_optimizer(
     tcgplayer_bytes: bytes,
     settings: OptimizerSettings,
@@ -461,7 +466,7 @@ def render_manual_resolution_panel(
 def render_low_price_inspection_page() -> None:
     st.title("LOW PRICE INSPECTION")
     st.caption("Upload a ManaBox CSV, find cards below your cutoff price, and export a purged ManaBox CSV in the same format and order.")
-    st.info("This tool uses the ManaBox 'Purchase price' column. 'Sequence' counts only the cards below your cutoff from top to bottom in the uploaded CSV, so the first qualifying card is Sequence 1. 'CSV Row' shows the original row in the uploaded file, including the header. The exported file also forces column M to Mint.")
+    st.info("This tool uses the ManaBox 'Purchase price' column. 'Sequence' counts only the cards below your cutoff from top to bottom in the uploaded CSV, so the first qualifying card is Sequence 1. 'CSV Row' shows the original row in the uploaded file, including the header. The exported file also forces column M to Mint and now downloads as UTF-8 for broader importer compatibility.")
 
     inspection_file = st.file_uploader("Upload ManaBox CSV", type=["csv"], key="manabox_low_price_file")
     threshold = st.number_input("Low price cutoff ($)", min_value=0.0, value=0.15, step=0.01, format="%.2f", key="manabox_low_price_threshold")
@@ -515,7 +520,7 @@ def render_low_price_inspection_page() -> None:
 
     st.download_button(
         "Purge Low Priced Cards and Download ManaBox CSV",
-        data=dataframe_to_plain_csv_bytes(purged_dataframe),
+        data=dataframe_to_utf8_csv_bytes(purged_dataframe),
         file_name=f"manabox_purged_{timestamp}.csv",
         mime="text/csv",
         width="stretch",
