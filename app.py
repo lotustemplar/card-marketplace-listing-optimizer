@@ -11,7 +11,7 @@ from pricing_logic import OptimizerSettings, process_files, try_parse_number
 from workbook_writer import build_workbook
 
 
-APP_VERSION = "1.9"
+APP_VERSION = "2.0"
 MANABOX_COLUMN_ALIASES = {
     "purchase_price": ["purchase price", "purchase_price", "purchaseprice"],
     "card_name": ["card name", "card_name", "name"],
@@ -440,7 +440,7 @@ def render_low_price_inspection_page() -> None:
         st.success(f"No ManaBox rows were found below ${threshold:.2f}.")
     else:
         st.warning(f"Found {len(low_rows_df)} row(s) below ${threshold:.2f}. Sequence reflects the top-to-bottom order among the cards below your cutoff.")
-        st.dataframe(low_rows_df, width="stretch", hide_index=True)
+        st.dataframe(low_rows_df, width="stretch", height=720, hide_index=True)
 
     st.download_button(
         "Purge Low Priced Cards and Download ManaBox CSV",
