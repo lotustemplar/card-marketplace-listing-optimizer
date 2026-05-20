@@ -11,7 +11,7 @@ from pricing_logic import OptimizerSettings, process_files, try_parse_number
 from workbook_writer import build_workbook
 
 
-APP_VERSION = "2.0"
+APP_VERSION = "2.1"
 MANABOX_COLUMN_ALIASES = {
     "purchase_price": ["purchase price", "purchase_price", "purchaseprice"],
     "card_name": ["card name", "card_name", "name"],
@@ -65,6 +65,54 @@ def map_manabox_columns(dataframe: pd.DataFrame) -> dict[str, str]:
     return mapped
 
 
+def get_manabox_quantity_column(dataframe: pd.DataFrame, column_map: dict[str, str]) -> str | None:
+    quantity_column = column_map.get("quantity")
+    if quantity_column:
+        return quantity_column
+    if len(dataframe.columns) >= 7:
+        return dataframe.columns[6]
+    return None
+
+
+def format_combined_quantity(quantity_value: float) -> str:
+    if float(quantity_value).is_integer():
+        return str(int(quantity_value))
+    return f"{quantity_value:.2f}".rstrip("0").rstrip(".")
+
+
+def combine_manabox_duplicate_rows(dataframe: pd.DataFrame, quantity_column: str | None) -> tuple[pd.DataFrame, int]:
+    if dataframe.empty or not quantity_column or quantity_column not in dataframe.columns:
+        return dataframe.reset_index(drop=True), 0
+
+    grouped_rows: dict[tuple[object, ...], dict[str, object]] = {}
+    collapsed_rows = 0
+    non_quantity_columns = [column for column in dataframe.columns if column != quantity_column]
+
+    for _, row in dataframe.iterrows():
+        key = tuple(row[column] for column in non_quantity_columns)
+        parsed_quantity, quantity_error = try_parse_number(row.get(quantity_column, ""))
+        numeric_quantity = parsed_quantity if quantity_error is None and parsed_quantity is not None else 1.0
+
+        existing = grouped_rows.get(key)
+        if existing is None:
+            row_dict = {column: row[column] for column in dataframe.columns}
+            row_dict[quantity_column] = float(numeric_quantity)
+            grouped_rows[key] = row_dict
+            continue
+
+        existing[quantity_column] = float(existing[quantity_column]) + float(numeric_quantity)
+        collapsed_rows += 1
+
+    combined_rows: list[dict[str, object]] = []
+    for row_dict in grouped_rows.values():
+        row_copy = dict(row_dict)
+        row_copy[quantity_column] = format_combined_quantity(float(row_copy[quantity_column]))
+        combined_rows.append(row_copy)
+
+    combined_dataframe = pd.DataFrame(combined_rows, columns=dataframe.columns)
+    return combined_dataframe.reset_index(drop=True), collapsed_rows
+
+
 def run_low_price_inspection(file_bytes: bytes, threshold: float) -> None:
     dataframe = load_csv_dataframe(file_bytes)
     column_map = map_manabox_columns(dataframe)
@@ -80,7 +128,7 @@ def run_low_price_inspection(file_bytes: bytes, threshold: float) -> None:
     set_code_column = column_map.get("set_code")
     set_name_column = column_map.get("set_name")
     card_number_column = column_map.get("card_number")
-    quantity_column = column_map.get("quantity")
+    quantity_column = get_manabox_quantity_column(dataframe, column_map)
 
     for index, (_, row) in enumerate(dataframe.iterrows(), start=1):
         raw_price = row.get(price_column, "")
@@ -112,14 +160,16 @@ def run_low_price_inspection(file_bytes: bytes, threshold: float) -> None:
         )
 
     purged_dataframe = dataframe.loc[keep_mask].reset_index(drop=True)
+    combined_purged_dataframe, collapsed_duplicate_rows = combine_manabox_duplicate_rows(purged_dataframe, quantity_column)
     low_rows_df = pd.DataFrame(low_rows)
     st.session_state["low_price_result"] = pickle.dumps(
         {
             "original_dataframe": dataframe,
-            "purged_dataframe": purged_dataframe,
+            "purged_dataframe": combined_purged_dataframe,
             "low_rows_df": low_rows_df,
             "threshold": threshold,
             "invalid_price_count": invalid_price_count,
+            "collapsed_duplicate_rows": collapsed_duplicate_rows,
         }
     )
 
@@ -428,6 +478,7 @@ def render_low_price_inspection_page() -> None:
     original_dataframe: pd.DataFrame = result["original_dataframe"]
     threshold = result["threshold"]
     invalid_price_count = result["invalid_price_count"]
+    collapsed_duplicate_rows = result.get("collapsed_duplicate_rows", 0)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M")
 
     metric_one, metric_two, metric_three, metric_four = st.columns(4)
@@ -441,6 +492,9 @@ def render_low_price_inspection_page() -> None:
     else:
         st.warning(f"Found {len(low_rows_df)} row(s) below ${threshold:.2f}. Sequence reflects the top-to-bottom order among the cards below your cutoff.")
         st.dataframe(low_rows_df, width="stretch", height=720, hide_index=True)
+
+    if collapsed_duplicate_rows:
+        st.info(f"The purged CSV will combine duplicate remaining rows by summing their quantity column. {collapsed_duplicate_rows} duplicate row(s) were merged.")
 
     st.download_button(
         "Purge Low Priced Cards and Download ManaBox CSV",
