@@ -11,7 +11,7 @@ from pricing_logic import OptimizerSettings, process_files, try_parse_number
 from workbook_writer import build_workbook
 
 
-APP_VERSION = "2.1"
+APP_VERSION = "2.2"
 MANABOX_COLUMN_ALIASES = {
     "purchase_price": ["purchase price", "purchase_price", "purchaseprice"],
     "card_name": ["card name", "card_name", "name"],
@@ -74,6 +74,14 @@ def get_manabox_quantity_column(dataframe: pd.DataFrame, column_map: dict[str, s
     return None
 
 
+def normalize_manabox_condition_column(dataframe: pd.DataFrame) -> pd.DataFrame:
+    if len(dataframe.columns) < 13:
+        return dataframe
+    normalized_dataframe = dataframe.copy()
+    normalized_dataframe[normalized_dataframe.columns[12]] = "Mint"
+    return normalized_dataframe
+
+
 def format_combined_quantity(quantity_value: float) -> str:
     if float(quantity_value).is_integer():
         return str(int(quantity_value))
@@ -114,7 +122,7 @@ def combine_manabox_duplicate_rows(dataframe: pd.DataFrame, quantity_column: str
 
 
 def run_low_price_inspection(file_bytes: bytes, threshold: float) -> None:
-    dataframe = load_csv_dataframe(file_bytes)
+    dataframe = normalize_manabox_condition_column(load_csv_dataframe(file_bytes))
     column_map = map_manabox_columns(dataframe)
     price_column = column_map.get("purchase_price")
     if not price_column:
@@ -451,7 +459,7 @@ def render_manual_resolution_panel(
 def render_low_price_inspection_page() -> None:
     st.title("LOW PRICE INSPECTION")
     st.caption("Upload a ManaBox CSV, find cards below your cutoff price, and export a purged ManaBox CSV in the same format and order.")
-    st.info("This tool uses the ManaBox 'Purchase price' column. 'Sequence' counts only the cards below your cutoff from top to bottom in the uploaded CSV, so the first qualifying card is Sequence 1. 'CSV Row' shows the original row in the uploaded file, including the header.")
+    st.info("This tool uses the ManaBox 'Purchase price' column. 'Sequence' counts only the cards below your cutoff from top to bottom in the uploaded CSV, so the first qualifying card is Sequence 1. 'CSV Row' shows the original row in the uploaded file, including the header. The exported file also forces column M to Mint.")
 
     inspection_file = st.file_uploader("Upload ManaBox CSV", type=["csv"], key="manabox_low_price_file")
     threshold = st.number_input("Low price cutoff ($)", min_value=0.0, value=0.15, step=0.01, format="%.2f", key="manabox_low_price_threshold")
