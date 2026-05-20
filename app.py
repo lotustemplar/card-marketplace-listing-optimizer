@@ -11,7 +11,7 @@ from pricing_logic import OptimizerSettings, process_files, try_parse_number
 from workbook_writer import build_workbook
 
 
-APP_VERSION = "1.8"
+APP_VERSION = "1.9"
 MANABOX_COLUMN_ALIASES = {
     "purchase_price": ["purchase price", "purchase_price", "purchaseprice"],
     "card_name": ["card name", "card_name", "name"],
@@ -75,7 +75,6 @@ def run_low_price_inspection(file_bytes: bytes, threshold: float) -> None:
     low_rows: list[dict[str, object]] = []
     keep_mask: list[bool] = []
     invalid_price_count = 0
-    total_rows = len(dataframe)
 
     card_name_column = column_map.get("card_name")
     set_code_column = column_map.get("set_code")
@@ -93,7 +92,6 @@ def run_low_price_inspection(file_bytes: bytes, threshold: float) -> None:
         if not is_low:
             continue
 
-        reverse_scan_position = total_rows - index + 1
         card_name = row.get(card_name_column, "") if card_name_column else ""
         set_code = row.get(set_code_column, "") if set_code_column else ""
         set_name = row.get(set_name_column, "") if set_name_column else ""
@@ -102,7 +100,7 @@ def run_low_price_inspection(file_bytes: bytes, threshold: float) -> None:
 
         low_rows.append(
             {
-                "Sequence": reverse_scan_position,
+                "Sequence": len(low_rows) + 1,
                 "CSV Row": index + 1,
                 "Card Name": card_name,
                 "Set Code": set_code,
@@ -113,7 +111,6 @@ def run_low_price_inspection(file_bytes: bytes, threshold: float) -> None:
             }
         )
 
-    low_rows.sort(key=lambda item: item["Sequence"])
     purged_dataframe = dataframe.loc[keep_mask].reset_index(drop=True)
     low_rows_df = pd.DataFrame(low_rows)
     st.session_state["low_price_result"] = pickle.dumps(
@@ -404,7 +401,7 @@ def render_manual_resolution_panel(
 def render_low_price_inspection_page() -> None:
     st.title("LOW PRICE INSPECTION")
     st.caption("Upload a ManaBox CSV, find cards below your cutoff price, and export a purged ManaBox CSV in the same format and order.")
-    st.info("This tool uses the ManaBox 'Purchase price' column. 'Sequence' is the actual reverse scan count, where the last scanned card is Sequence 1, the card before that is Sequence 2, and so on. 'CSV Row' still shows the original row in the uploaded file, including the header.")
+    st.info("This tool uses the ManaBox 'Purchase price' column. 'Sequence' counts only the cards below your cutoff from top to bottom in the uploaded CSV, so the first qualifying card is Sequence 1. 'CSV Row' shows the original row in the uploaded file, including the header.")
 
     inspection_file = st.file_uploader("Upload ManaBox CSV", type=["csv"], key="manabox_low_price_file")
     threshold = st.number_input("Low price cutoff ($)", min_value=0.0, value=0.15, step=0.01, format="%.2f", key="manabox_low_price_threshold")
@@ -442,7 +439,7 @@ def render_low_price_inspection_page() -> None:
     if low_rows_df.empty:
         st.success(f"No ManaBox rows were found below ${threshold:.2f}.")
     else:
-        st.warning(f"Found {len(low_rows_df)} row(s) below ${threshold:.2f}. Sequence reflects the actual reverse scan count from your CSV.")
+        st.warning(f"Found {len(low_rows_df)} row(s) below ${threshold:.2f}. Sequence reflects the top-to-bottom order among the cards below your cutoff.")
         st.dataframe(low_rows_df, width="stretch", hide_index=True)
 
     st.download_button(
