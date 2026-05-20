@@ -11,7 +11,7 @@ from pricing_logic import OptimizerSettings, process_files, try_parse_number
 from workbook_writer import build_workbook
 
 
-APP_VERSION = "1.6"
+APP_VERSION = "1.7"
 MANABOX_COLUMN_ALIASES = {
     "purchase_price": ["purchase price", "purchase_price", "purchaseprice"],
     "card_name": ["card name", "card_name", "name"],
@@ -93,7 +93,7 @@ def run_low_price_inspection(file_bytes: bytes, threshold: float) -> None:
         if not is_low:
             continue
 
-        reversed_sequence = total_rows - index + 1
+        reverse_scan_position = total_rows - index + 1
         card_name = row.get(card_name_column, "") if card_name_column else ""
         set_code = row.get(set_code_column, "") if set_code_column else ""
         set_name = row.get(set_name_column, "") if set_name_column else ""
@@ -102,7 +102,7 @@ def run_low_price_inspection(file_bytes: bytes, threshold: float) -> None:
 
         low_rows.append(
             {
-                "Sequence": reversed_sequence,
+                "Scan Position": reverse_scan_position,
                 "CSV Row": index + 1,
                 "Card Name": card_name,
                 "Set Code": set_code,
@@ -113,7 +113,25 @@ def run_low_price_inspection(file_bytes: bytes, threshold: float) -> None:
             }
         )
 
-    low_rows.sort(key=lambda item: item["Sequence"])
+    low_rows.sort(key=lambda item: item["Scan Position"])
+    for sequence, item in enumerate(low_rows, start=1):
+        item["Sequence"] = sequence
+
+    low_rows = [
+        {
+            "Sequence": item["Sequence"],
+            "Scan Position": item["Scan Position"],
+            "CSV Row": item["CSV Row"],
+            "Card Name": item["Card Name"],
+            "Set Code": item["Set Code"],
+            "Set Name": item["Set Name"],
+            "Card Number": item["Card Number"],
+            "Quantity": item["Quantity"],
+            "Purchase Price": item["Purchase Price"],
+        }
+        for item in low_rows
+    ]
+
     purged_dataframe = dataframe.loc[keep_mask].reset_index(drop=True)
     low_rows_df = pd.DataFrame(low_rows)
     st.session_state["low_price_result"] = pickle.dumps(
@@ -404,7 +422,7 @@ def render_manual_resolution_panel(
 def render_low_price_inspection_page() -> None:
     st.title("LOW PRICE INSPECTION")
     st.caption("Upload a ManaBox CSV, find cards below your cutoff price, and export a purged ManaBox CSV in the same format and order.")
-    st.info("This tool uses the ManaBox 'Purchase price' column and reports each low-priced card in reverse scan order, so the last scanned card becomes Sequence 1. 'CSV Row' still shows the original row in the uploaded file, including the header.")
+    st.info("This tool uses the ManaBox 'Purchase price' column. 'Sequence' means the 1st flagged card to remove, 2nd flagged card to remove, and so on in reverse scan order. 'Scan Position' shows the absolute reverse-scan location, where the last scanned card is position 1. 'CSV Row' still shows the original row in the uploaded file, including the header.")
 
     inspection_file = st.file_uploader("Upload ManaBox CSV", type=["csv"], key="manabox_low_price_file")
     threshold = st.number_input("Low price cutoff ($)", min_value=0.0, value=0.15, step=0.01, format="%.2f", key="manabox_low_price_threshold")
@@ -442,7 +460,7 @@ def render_low_price_inspection_page() -> None:
     if low_rows_df.empty:
         st.success(f"No ManaBox rows were found below ${threshold:.2f}.")
     else:
-        st.warning(f"Found {len(low_rows_df)} row(s) below ${threshold:.2f}. These are shown in reverse scan order, where the last scanned card is Sequence 1.")
+        st.warning(f"Found {len(low_rows_df)} row(s) below ${threshold:.2f}. Sequence now counts only the flagged cards in reverse scan order.")
         st.dataframe(low_rows_df, width="stretch", hide_index=True)
 
     st.download_button(
