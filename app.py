@@ -11,7 +11,7 @@ from pricing_logic import OptimizerSettings, process_files, try_parse_number
 from workbook_writer import build_workbook
 
 
-APP_VERSION = "2.2"
+APP_VERSION = "2.3"
 MANABOX_COLUMN_ALIASES = {
     "purchase_price": ["purchase price", "purchase_price", "purchaseprice"],
     "card_name": ["card name", "card_name", "name"],
@@ -121,7 +121,7 @@ def combine_manabox_duplicate_rows(dataframe: pd.DataFrame, quantity_column: str
     return combined_dataframe.reset_index(drop=True), collapsed_rows
 
 
-def run_low_price_inspection(file_bytes: bytes, threshold: float) -> None:
+def run_low_price_inspection(file_bytes: bytes, threshold: float, combine_quantity: bool) -> None:
     dataframe = normalize_manabox_condition_column(load_csv_dataframe(file_bytes))
     column_map = map_manabox_columns(dataframe)
     price_column = column_map.get("purchase_price")
@@ -167,17 +167,19 @@ def run_low_price_inspection(file_bytes: bytes, threshold: float) -> None:
             }
         )
 
-    purged_dataframe = dataframe.loc[keep_mask].reset_index(drop=True)
-    combined_purged_dataframe, collapsed_duplicate_rows = combine_manabox_duplicate_rows(purged_dataframe, quantity_column)
+    base_purged_dataframe = dataframe.loc[keep_mask].reset_index(drop=True)
+    combined_purged_dataframe, collapsed_duplicate_rows = combine_manabox_duplicate_rows(base_purged_dataframe, quantity_column)
+    final_purged_dataframe = combined_purged_dataframe if combine_quantity else base_purged_dataframe
     low_rows_df = pd.DataFrame(low_rows)
     st.session_state["low_price_result"] = pickle.dumps(
         {
             "original_dataframe": dataframe,
-            "purged_dataframe": combined_purged_dataframe,
+            "purged_dataframe": final_purged_dataframe,
             "low_rows_df": low_rows_df,
             "threshold": threshold,
             "invalid_price_count": invalid_price_count,
             "collapsed_duplicate_rows": collapsed_duplicate_rows,
+            "combine_quantity": combine_quantity,
         }
     )
 
@@ -463,6 +465,7 @@ def render_low_price_inspection_page() -> None:
 
     inspection_file = st.file_uploader("Upload ManaBox CSV", type=["csv"], key="manabox_low_price_file")
     threshold = st.number_input("Low price cutoff ($)", min_value=0.0, value=0.15, step=0.01, format="%.2f", key="manabox_low_price_threshold")
+    combine_quantity = st.toggle("Combine Quantity", value=True, key="manabox_combine_quantity_toggle")
     inspect_clicked = st.button("Inspect Low Prices", type="primary", width="stretch", key="inspect_low_prices_button")
 
     if inspect_clicked:
@@ -470,7 +473,7 @@ def render_low_price_inspection_page() -> None:
             st.error("Please upload a ManaBox CSV export.")
             return
         try:
-            run_low_price_inspection(inspection_file.getvalue(), threshold)
+            run_low_price_inspection(inspection_file.getvalue(), threshold, combine_quantity)
         except Exception as exc:
             st.error(f"Low price inspection failed: {exc}")
             return
@@ -487,6 +490,7 @@ def render_low_price_inspection_page() -> None:
     threshold = result["threshold"]
     invalid_price_count = result["invalid_price_count"]
     collapsed_duplicate_rows = result.get("collapsed_duplicate_rows", 0)
+    quantity_combined = result.get("combine_quantity", False)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M")
 
     metric_one, metric_two, metric_three, metric_four = st.columns(4)
@@ -501,8 +505,13 @@ def render_low_price_inspection_page() -> None:
         st.warning(f"Found {len(low_rows_df)} row(s) below ${threshold:.2f}. Sequence reflects the top-to-bottom order among the cards below your cutoff.")
         st.dataframe(low_rows_df, width="stretch", height=720, hide_index=True)
 
-    if collapsed_duplicate_rows:
-        st.info(f"The purged CSV will combine duplicate remaining rows by summing their quantity column. {collapsed_duplicate_rows} duplicate row(s) were merged.")
+    if quantity_combined:
+        if collapsed_duplicate_rows:
+            st.info(f"Combine Quantity is on. The purged CSV will merge duplicate remaining rows and sum their quantity column. {collapsed_duplicate_rows} duplicate row(s) were merged.")
+        else:
+            st.info("Combine Quantity is on. No duplicate remaining rows needed to be merged for this run.")
+    else:
+        st.info("Combine Quantity is off. The purged CSV will keep duplicate remaining rows separate.")
 
     st.download_button(
         "Purge Low Priced Cards and Download ManaBox CSV",
