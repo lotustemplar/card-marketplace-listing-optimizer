@@ -276,11 +276,11 @@ def _infer_base_direct_price(required_direct_price: Any, direct_bump_pct: Any) -
         return None
     bump_value, bump_error = base.try_parse_number(direct_bump_pct)
     if bump_error is not None or bump_value is None:
-        return round(required_price, 2)
+        return base.normalize_direct_listing_price(required_price)
     denominator = 1 + bump_value
     if denominator <= 0:
         return None
-    return round(required_price / denominator, 2)
+    return base.normalize_direct_listing_price(required_price / denominator)
 
 
 def _build_direct_row_key_dataframe(df: pd.DataFrame, product_name_column: str, set_name_column: str, number_column: str | None) -> pd.Series:
