@@ -763,6 +763,8 @@ def process_files(
         product_name = safe_text(row.get(column_map["Product Name"], ""))
         set_name = safe_text(row.get(column_map["Set Name"], ""))
         card_number = safe_text(row.get(column_map.get("Number", ""), "")) if column_map.get("Number") else ""
+        rarity_value = safe_text(row.get(column_map.get("Rarity", ""), "")) if column_map.get("Rarity") else ""
+        force_direct_for_token = rarity_value.strip().upper() == "T"
         row_tuple = (
             normalize_header(product_name),
             normalize_header(set_name),
@@ -815,7 +817,14 @@ def process_files(
         if forced_min:
             reason_parts.append("Forced to Manapool minimum")
 
-        if direct_listing_price is None or direct_net is None:
+        if force_direct_for_token:
+            if direct_listing_price is None or direct_net is None:
+                direct_listing_price = round(base_direct_price, 2) if base_direct_price is not None else None
+                direct_net = lookup_direct_net(direct_listing_price) if direct_listing_price is not None else None
+            direct_bump_pct = calculate_direct_bump_pct(base_direct_price, direct_listing_price)
+            destination = "direct"
+            reason_parts.append("Forced to TCGPlayer Direct because Rarity = T")
+        elif direct_listing_price is None or direct_net is None:
             destination = "manapool"
             bump_exceeded = True
             direct_bump_exceeded_count += 1
@@ -842,12 +851,15 @@ def process_files(
             "Set Name": set_name,
             "Product Name": product_name,
             "Number": card_number,
-            "Rarity": safe_text(row.get(column_map.get("Rarity", ""), "")) if column_map.get("Rarity") else "",
+            "Rarity": rarity_value,
             "Condition": safe_text(row.get(column_map.get("Condition", ""), "")) if column_map.get("Condition") else "",
             "Quantity": normalize_quantity(quantity),
         }
 
         if destination == "direct":
+            if direct_listing_price is None:
+                error_rows.append(build_error_row(row, "Forced Direct row is missing a usable Direct listing price", source_columns))
+                continue
             direct_csv_rows.append(build_upload_row(row, source_columns, column_map, quantity, direct_listing_price))
             direct_rows.append(
                 {
