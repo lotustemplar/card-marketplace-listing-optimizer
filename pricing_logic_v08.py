@@ -110,6 +110,7 @@ MANAPOOL_CARD_INFO_ENDPOINT = "card_info"
 MANAPOOL_VARIANT_PRICES_ENDPOINT = "prices/variants"
 MANAPOOL_TIMEOUT_SECONDS = 20
 MANAPOOL_BATCH_SIZE = 40
+DIRECT_MIN_LISTING_PRICE = 0.40
 
 
 @dataclass
@@ -143,6 +144,7 @@ class OptimizerSettings:
                 display = str(value)
             rows.append({"Metric": label, "Value": display})
         rows.append({"Metric": "Actual shipping/supply cost", "Value": f"${self.shipping_supply_cost:.2f}"})
+        rows.append({"Metric": "Direct minimum listing price", "Value": f"${DIRECT_MIN_LISTING_PRICE:.2f}"})
         rows.append(
             {
                 "Metric": "TCGPlayer Direct fee model",
@@ -275,7 +277,15 @@ def calculate_manapool_net(card_price: float, settings: OptimizerSettings) -> fl
     return round(net, 2)
 
 
+def normalize_direct_listing_price(listing_price: float | None) -> float | None:
+    if listing_price is None:
+        return None
+    return round(max(float(listing_price), DIRECT_MIN_LISTING_PRICE), 2)
+
+
 def calculate_direct_net(listing_price: float) -> float:
+    listing_price = normalize_direct_listing_price(listing_price)
+    assert listing_price is not None
     if listing_price < 2.50:
         return round(listing_price * 0.50, 2)
     fees = 1.12 + (listing_price * 0.0895) + (listing_price * 0.025)
@@ -283,16 +293,17 @@ def calculate_direct_net(listing_price: float) -> float:
 
 
 def lookup_direct_net(proposed_price: float | None) -> float | None:
-    if proposed_price is None:
+    normalized_price = normalize_direct_listing_price(proposed_price)
+    if normalized_price is None:
         return None
-    return calculate_direct_net(round(proposed_price, 2))
+    return calculate_direct_net(normalized_price)
 
 
 def find_required_direct_price(target_net: float) -> float | None:
     if target_net <= 0:
-        return 0.01
+        return DIRECT_MIN_LISTING_PRICE
     rounded_target = round(target_net, 2)
-    for cents in range(1, 500001):
+    for cents in range(int(DIRECT_MIN_LISTING_PRICE * 100), 500001):
         listing_price = cents / 100
         if calculate_direct_net(listing_price) >= rounded_target:
             return round(listing_price, 2)
@@ -800,15 +811,16 @@ def process_files(
             base_direct_price = direct_low
         else:
             base_direct_price = max(market_price, direct_low)
+        base_direct_price = normalize_direct_listing_price(base_direct_price)
 
         base_direct_net = lookup_direct_net(base_direct_price)
         if base_direct_net is not None:
             all_direct_estimated_net += base_direct_net * quantity
         required_direct_price = find_required_direct_price(manapool_net)
         if base_direct_price is not None and base_direct_net is not None and base_direct_net >= manapool_net:
-            required_direct_price = round(base_direct_price, 2)
+            required_direct_price = base_direct_price
 
-        direct_listing_price = required_direct_price
+        direct_listing_price = normalize_direct_listing_price(required_direct_price)
         direct_net = lookup_direct_net(direct_listing_price) if direct_listing_price is not None else None
         direct_bump_pct = None
         bump_exceeded = False
@@ -819,7 +831,7 @@ def process_files(
 
         if force_direct_for_token:
             if direct_listing_price is None or direct_net is None:
-                direct_listing_price = round(base_direct_price, 2) if base_direct_price is not None else None
+                direct_listing_price = normalize_direct_listing_price(base_direct_price)
                 direct_net = lookup_direct_net(direct_listing_price) if direct_listing_price is not None else None
             direct_bump_pct = calculate_direct_bump_pct(base_direct_price, direct_listing_price)
             destination = "direct"
