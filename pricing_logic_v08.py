@@ -775,7 +775,6 @@ def process_files(
         set_name = safe_text(row.get(column_map["Set Name"], ""))
         card_number = safe_text(row.get(column_map.get("Number", ""), "")) if column_map.get("Number") else ""
         rarity_value = safe_text(row.get(column_map.get("Rarity", ""), "")) if column_map.get("Rarity") else ""
-        force_direct_for_token = rarity_value.strip().upper() == "T"
         row_tuple = (
             normalize_header(product_name),
             normalize_header(set_name),
@@ -806,12 +805,12 @@ def process_files(
         all_manapool_estimated_net += manapool_net * quantity
 
         if direct_low is None:
-            base_direct_price = market_price
+            raw_base_direct_price = market_price
         elif market_price is None:
-            base_direct_price = direct_low
+            raw_base_direct_price = direct_low
         else:
-            base_direct_price = max(market_price, direct_low)
-        base_direct_price = normalize_direct_listing_price(base_direct_price)
+            raw_base_direct_price = max(market_price, direct_low)
+        base_direct_price = normalize_direct_listing_price(raw_base_direct_price)
 
         base_direct_net = lookup_direct_net(base_direct_price)
         if base_direct_net is not None:
@@ -829,20 +828,13 @@ def process_files(
         if forced_min:
             reason_parts.append("Forced to Manapool minimum")
 
-        if force_direct_for_token:
-            if direct_listing_price is None or direct_net is None:
-                direct_listing_price = normalize_direct_listing_price(base_direct_price)
-                direct_net = lookup_direct_net(direct_listing_price) if direct_listing_price is not None else None
-            direct_bump_pct = calculate_direct_bump_pct(base_direct_price, direct_listing_price)
-            destination = "direct"
-            reason_parts.append("Forced to TCGPlayer Direct because Rarity = T")
-        elif direct_listing_price is None or direct_net is None:
+        if direct_listing_price is None or direct_net is None:
             destination = "manapool"
             bump_exceeded = True
             direct_bump_exceeded_count += 1
             reason_parts.append("Required Direct Price not found")
         else:
-            direct_bump_pct = calculate_direct_bump_pct(base_direct_price, direct_listing_price)
+            direct_bump_pct = calculate_direct_bump_pct(raw_base_direct_price, direct_listing_price)
             if direct_bump_pct is None:
                 destination = "manapool"
                 bump_exceeded = True
