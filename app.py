@@ -11,7 +11,7 @@ from pricing_logic import OptimizerSettings, process_files, try_parse_number
 from workbook_writer import build_workbook
 
 
-APP_VERSION = "2.9"
+APP_VERSION = "3.0"
 MANABOX_COLUMN_ALIASES = {
     "purchase_price": ["purchase price", "purchase_price", "purchaseprice"],
     "card_name": ["card name", "card_name", "name"],
@@ -590,7 +590,7 @@ def main() -> None:
     st.title("Card Marketplace Listing Optimizer")
     st.caption(f"Compare TCGPlayer Direct vs Manapool and generate optimized listing sheets. App version {APP_VERSION}.")
     st.info("TCGPlayer Direct fees are built into the app: under $2.50 the net is 50% of item value, and at $2.50 or higher the fee model is $1.12 + 8.95% + 2.5%. A hard $0.40 minimum Direct listing floor is now enforced across the Direct math and outputs.")
-    st.success("Mana Pool pricing now assumes Near Mint nonfoil by default, uses Near Mint Foil pricing only when the TCGPlayer condition says foil, treats The List Reprints as PLST during set matching, includes hypothetical all-Mana-Pool vs all-Direct net totals for comparison, and never allows Direct bump pricing above the percentage cap you set. The Direct bump % is now measured from the actual TCG-based starting price before the $0.40 floor is applied.")
+    st.success("Mana Pool pricing now assumes Near Mint nonfoil by default, uses Near Mint Foil pricing only when the TCGPlayer condition says foil, treats The List Reprints as PLST during set matching, includes hypothetical all-Mana-Pool vs all-Direct net totals for comparison, and never allows Direct bump pricing above the percentage cap you set. Sub-$0.40 TCG bases now use $0.40 as the only Direct floor candidate and are no longer auto-bumped to $0.45.")
 
     with st.expander("Mana Pool Credential Diagnostics"):
         diagnostics_df = pd.DataFrame(
