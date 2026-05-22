@@ -270,6 +270,98 @@ def load_manapool_price_lookup(
     return price_lookup, source_lookup, "\n\n".join(warnings) if warnings else None, unresolved_options, manual_override_count
 
 
+def _result_row_key(id_value: Any, product_name: Any, set_name: Any, number: Any, condition: Any) -> tuple[str, str, str, str, str]:
+    return (
+        base.safe_text(id_value),
+        base.normalize_header(product_name),
+        base.normalize_header(set_name),
+        base.normalize_identifier(number),
+        base.normalize_header(condition),
+    )
+
+
+def _source_row_key(row: pd.Series, column_map: dict[str, str]) -> tuple[str, str, str, str, str]:
+    return _result_row_key(
+        row.get(column_map.get("TCGplayer Id", ""), "") if column_map.get("TCGplayer Id") else "",
+        row.get(column_map.get("Product Name", ""), "") if column_map.get("Product Name") else "",
+        row.get(column_map.get("Set Name", ""), "") if column_map.get("Set Name") else "",
+        row.get(column_map.get("Number", ""), "") if column_map.get("Number") else "",
+        row.get(column_map.get("Condition", ""), "") if column_map.get("Condition") else "",
+    )
+
+
+def _preview_row_key(row: pd.Series) -> tuple[str, str, str, str, str]:
+    return _result_row_key(
+        row.get("TCGplayer Id", ""),
+        row.get("Product Name", ""),
+        row.get("Set Name", ""),
+        row.get("Number", ""),
+        row.get("Condition", ""),
+    )
+
+
+def _raw_base_direct_price_from_source(row: pd.Series, column_map: dict[str, str]) -> float | None:
+    market_price = None
+    direct_low = None
+    if column_map.get("TCG Market Price"):
+        market_price, _ = base.try_parse_number(row.get(column_map["TCG Market Price"], ""))
+    if column_map.get("TCG Direct Low"):
+        direct_low, _ = base.try_parse_number(row.get(column_map["TCG Direct Low"], ""))
+    if direct_low is None:
+        return market_price
+    if market_price is None:
+        return direct_low
+    return max(market_price, direct_low)
+
+
+def _append_reason(reason_text: Any, extra_reason: str) -> str:
+    parts = [part for part in str(reason_text).split("; ") if part]
+    if extra_reason not in parts:
+        parts.append(extra_reason)
+    return "; ".join(parts)
+
+
+def _rebuild_summary(result: ProcessResult, settings: OptimizerSettings) -> None:
+    manapool_full_df = result.manapool_full_df
+    direct_full_df = result.direct_full_df
+
+    manapool_total_net = 0.0
+    direct_total_net = 0.0
+    if not manapool_full_df.empty:
+        manapool_total_net = float((pd.to_numeric(manapool_full_df["Manapool Net"], errors="coerce").fillna(0) * pd.to_numeric(manapool_full_df["Quantity"], errors="coerce").fillna(0)).sum())
+    if not direct_full_df.empty:
+        direct_total_net = float((pd.to_numeric(direct_full_df["Direct Net"], errors="coerce").fillna(0) * pd.to_numeric(direct_full_df["Quantity"], errors="coerce").fillna(0)).sum())
+
+    direct_bump_average = 0.0
+    if not direct_full_df.empty:
+        direct_bump_series = pd.to_numeric(direct_full_df["Direct Bump %"], errors="coerce").dropna()
+        if not direct_bump_series.empty:
+            direct_bump_average = float(direct_bump_series.mean())
+
+    tracked_shipping_review_count = 0
+    if not manapool_full_df.empty:
+        tracked_shipping_review_count = int((pd.to_numeric(manapool_full_df["Manapool Price"], errors="coerce").fillna(0) >= settings.tracked_shipping_threshold).sum())
+
+    summary = dict(result.summary)
+    summary.update(
+        {
+            "total_cards_assigned_manapool": int(pd.to_numeric(manapool_full_df["Quantity"], errors="coerce").fillna(0).sum()) if not manapool_full_df.empty else 0,
+            "total_cards_assigned_direct": int(pd.to_numeric(direct_full_df["Quantity"], errors="coerce").fillna(0).sum()) if not direct_full_df.empty else 0,
+            "total_estimated_manapool_net": round(manapool_total_net, 2),
+            "total_estimated_direct_net": round(direct_total_net, 2),
+            "combined_estimated_net": round(manapool_total_net + direct_total_net, 2),
+            "average_direct_bump_pct": direct_bump_average,
+            "forced_manapool_min_count": int(manapool_full_df.get("_forced_min", pd.Series(dtype=bool)).fillna(False).astype(bool).sum()) if not manapool_full_df.empty else 0,
+            "direct_bump_exceeded_count": int(manapool_full_df.get("_bump_exceeded", pd.Series(dtype=bool)).fillna(False).astype(bool).sum()) if not manapool_full_df.empty else 0,
+            "tracked_shipping_review_count": tracked_shipping_review_count,
+        }
+    )
+    result.summary = summary
+    result.analysis_df = base.build_analysis_dataframe(summary, settings)
+    result.manapool_preview_df = base.sort_preview(manapool_full_df, base.DISPLAY_COLUMNS_MANAPOOL)
+    result.direct_preview_df = base.sort_preview(direct_full_df, base.DISPLAY_COLUMNS_DIRECT)
+
+
 def process_files(
     tcgplayer_bytes: bytes,
     settings: OptimizerSettings,
@@ -277,13 +369,138 @@ def process_files(
     manapool_email: str | None = None,
     manapool_match_overrides: dict[str, dict[str, Any]] | None = None,
 ) -> ProcessResult:
-    return base.process_files(
+    result = base.process_files(
         tcgplayer_bytes=tcgplayer_bytes,
         settings=settings,
         manapool_api_key=manapool_api_key,
         manapool_email=manapool_email,
         manapool_match_overrides=manapool_match_overrides,
     )
+
+    if result.direct_full_df.empty:
+        return result
+
+    source_df = base.load_tcgplayer_dataframe(tcgplayer_bytes)
+    column_map, missing_columns = base.map_tcgplayer_columns(source_df)
+    if missing_columns:
+        return result
+
+    source_columns = list(source_df.columns)
+    source_lookup = {_source_row_key(row, column_map): row for _, row in source_df.iterrows()}
+
+    adjusted_direct_rows: list[dict[str, Any]] = []
+    rerouted_manapool_rows: list[dict[str, Any]] = []
+    new_direct_csv_rows: list[dict[str, Any]] = []
+    rerouted_manapool_csv_rows: list[dict[str, Any]] = []
+
+    for _, direct_row in result.direct_full_df.iterrows():
+        preview_key = _preview_row_key(direct_row)
+        source_row = source_lookup.get(preview_key)
+        if source_row is None:
+            adjusted_direct_rows.append(direct_row.to_dict())
+            continue
+
+        raw_base_direct_price = _raw_base_direct_price_from_source(source_row, column_map)
+        current_listing_price, _ = base.try_parse_number(direct_row.get("Direct Listing Price"))
+
+        if (
+            raw_base_direct_price is None
+            or raw_base_direct_price >= base.DIRECT_MIN_LISTING_PRICE
+            or current_listing_price is None
+            or current_listing_price <= base.DIRECT_MIN_LISTING_PRICE
+        ):
+            adjusted_direct_rows.append(direct_row.to_dict())
+            new_direct_csv_rows.append(
+                base.build_upload_row(
+                    source_row,
+                    source_columns,
+                    column_map,
+                    float(pd.to_numeric(direct_row.get("Quantity"), errors="coerce")),
+                    float(current_listing_price) if current_listing_price is not None else base.DIRECT_MIN_LISTING_PRICE,
+                )
+            )
+            continue
+
+        floored_direct_price = base.DIRECT_MIN_LISTING_PRICE
+        floored_direct_net = base.lookup_direct_net(floored_direct_price)
+        direct_bump_pct = base.calculate_direct_bump_pct(raw_base_direct_price, floored_direct_price)
+
+        if direct_bump_pct is None or direct_bump_pct > settings.max_direct_bump_pct:
+            reroute_reason = _append_reason(direct_row.get("Reason", ""), "Direct floor enforced at $0.40")
+            reroute_reason = _append_reason(reroute_reason, "Required Direct bump exceeded max allowed %")
+            rerouted_manapool_rows.append(
+                {
+                    "TCGplayer Id": direct_row.get("TCGplayer Id", ""),
+                    "Product Line": direct_row.get("Product Line", ""),
+                    "Set Name": direct_row.get("Set Name", ""),
+                    "Product Name": direct_row.get("Product Name", ""),
+                    "Number": direct_row.get("Number", ""),
+                    "Rarity": direct_row.get("Rarity", ""),
+                    "Condition": direct_row.get("Condition", ""),
+                    "Quantity": direct_row.get("Quantity", ""),
+                    "Manapool Price": direct_row.get("Manapool Price", ""),
+                    "Manapool Net": direct_row.get("Manapool Net", ""),
+                    "Base Direct Price": round(base.normalize_direct_listing_price(raw_base_direct_price), 2) if raw_base_direct_price is not None else None,
+                    "Base Direct Net": round(floored_direct_net, 2) if floored_direct_net is not None else None,
+                    "Required Direct Price": floored_direct_price,
+                    "Direct Bump %": direct_bump_pct,
+                    "Reason": reroute_reason,
+                    "_forced_min": "Forced to Manapool minimum" in str(direct_row.get("Reason", "")),
+                    "_bump_exceeded": True,
+                }
+            )
+            rerouted_manapool_csv_rows.append(
+                base.build_upload_row(
+                    source_row,
+                    source_columns,
+                    column_map,
+                    float(pd.to_numeric(direct_row.get("Quantity"), errors="coerce")),
+                    float(pd.to_numeric(direct_row.get("Manapool Price"), errors="coerce")),
+                )
+            )
+            continue
+
+        adjusted_reason = _append_reason(direct_row.get("Reason", ""), "Direct floor enforced at $0.40")
+        adjusted_direct_row = direct_row.to_dict()
+        adjusted_direct_row["Direct Listing Price"] = floored_direct_price
+        adjusted_direct_row["Direct Net"] = round(floored_direct_net, 2) if floored_direct_net is not None else None
+        adjusted_direct_row["Direct Bump %"] = direct_bump_pct
+        adjusted_direct_row["Reason"] = adjusted_reason
+        adjusted_direct_rows.append(adjusted_direct_row)
+        new_direct_csv_rows.append(
+            base.build_upload_row(
+                source_row,
+                source_columns,
+                column_map,
+                float(pd.to_numeric(direct_row.get("Quantity"), errors="coerce")),
+                floored_direct_price,
+            )
+        )
+
+    if not rerouted_manapool_rows and len(new_direct_csv_rows) == len(result.direct_full_df):
+        result.direct_csv_df = pd.DataFrame(new_direct_csv_rows, columns=source_columns)
+        return result
+
+    result.direct_full_df = pd.DataFrame(adjusted_direct_rows, columns=base.DISPLAY_COLUMNS_DIRECT + ["_bump_exceeded"])
+    if rerouted_manapool_rows:
+        reroute_df = pd.DataFrame(rerouted_manapool_rows, columns=base.DISPLAY_COLUMNS_MANAPOOL + ["_forced_min", "_bump_exceeded"])
+        if result.manapool_full_df.empty:
+            result.manapool_full_df = reroute_df
+        else:
+            result.manapool_full_df = pd.concat([result.manapool_full_df, reroute_df], ignore_index=True)
+        result.manapool_full_df = result.manapool_full_df.sort_values("Product Name", key=lambda series: series.astype(str).str.lower()).reset_index(drop=True)
+        existing_manapool_csv_df = result.manapool_csv_df if not result.manapool_csv_df.empty else pd.DataFrame(columns=source_columns)
+        rerouted_csv_df = pd.DataFrame(rerouted_manapool_csv_rows, columns=source_columns)
+        result.manapool_csv_df = pd.concat([existing_manapool_csv_df, rerouted_csv_df], ignore_index=True)
+
+    result.direct_full_df = result.direct_full_df.sort_values("Product Name", key=lambda series: series.astype(str).str.lower()).reset_index(drop=True)
+    result.direct_csv_df = pd.DataFrame(new_direct_csv_rows, columns=source_columns)
+
+    _rebuild_summary(result, settings)
+    result.warning_message = "\n\n".join(
+        [message for message in [result.warning_message, "Direct listings with a raw TCG base below $0.40 now use $0.40 as the only Direct floor candidate; they are no longer auto-bumped to $0.45."] if message]
+    )
+    return result
 
 
 base.load_manapool_price_lookup = load_manapool_price_lookup
