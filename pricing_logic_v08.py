@@ -624,8 +624,7 @@ def build_analysis_dataframe(summary: dict[str, Any], settings: OptimizerSetting
         {"Metric": "Number of cards with missing price data", "Value": summary["missing_price_data_count"]},
         {
             "Metric": f"Number of cards forced to Manapool ${settings.manapool_min_price:.2f} minimum",
-            "Value": summary["forced_manapool_min_count"],
-        },
+            "Value": summary["forced_manapool_min_count"]},
         {"Metric": "Number of cards where Direct bump exceeded max allowed %", "Value": summary["direct_bump_exceeded_count"]},
         {"Metric": "Cards priced from Mana Pool API", "Value": summary["manapool_api_price_count"]},
         {"Metric": "Cards priced from TCG fallback", "Value": summary["manapool_fallback_price_count"]},
@@ -815,9 +814,13 @@ def process_files(
         base_direct_net = lookup_direct_net(base_direct_price)
         if base_direct_net is not None:
             all_direct_estimated_net += base_direct_net * quantity
-        required_direct_price = find_required_direct_price(manapool_net)
-        if base_direct_price is not None and base_direct_net is not None and base_direct_net >= manapool_net:
-            required_direct_price = base_direct_price
+
+        if raw_base_direct_price is not None and raw_base_direct_price < DIRECT_MIN_LISTING_PRICE:
+            required_direct_price = DIRECT_MIN_LISTING_PRICE
+        else:
+            required_direct_price = find_required_direct_price(manapool_net)
+            if base_direct_price is not None and base_direct_net is not None and base_direct_net >= manapool_net:
+                required_direct_price = base_direct_price
 
         direct_listing_price = normalize_direct_listing_price(required_direct_price)
         direct_net = lookup_direct_net(direct_listing_price) if direct_listing_price is not None else None
