@@ -325,6 +325,16 @@ def normalize_tcg_rarity(rarity_value: Any) -> str:
     return rarity_text.upper()
 
 
+def normalize_tcg_set_name(set_name_value: Any) -> str:
+    set_name = safe_text(set_name_value)
+    normalized = normalize_header(set_name)
+    set_name_map = {
+        "secret lair drop": "Secret Lair Drop Series",
+        "the list reprints": "The List",
+    }
+    return set_name_map.get(normalized, set_name)
+
+
 def build_row_key(name: Any, set_code: Any, collector_number: Any, condition: Any, language: Any = "") -> str:
     parts = [
         normalize_header(name),
@@ -569,7 +579,7 @@ def _prepare_tcg_rows(tcgplayer_bytes: bytes) -> tuple[list[dict[str, Any]], lis
             row_errors.append("Missing both TCG Market Price and TCG Low Price")
 
         if row_errors:
-            error_rows.append(build_error_row({column: row.get(column, "") for column in df.columns}, "; ".join(dict.fromkeys(row_errors))))
+            error_rows.append(build_error_row({column: row.get(column, "") for column in source_columns}, "; ".join(dict.fromkeys(row_errors))))
             continue
 
         standard_rows.append(
@@ -626,7 +636,7 @@ def _prepare_manabox_price_rows(file_bytes: bytes, price_label: str) -> tuple[pd
                 ),
                 "Product Name": safe_text(row.get(column_map["Name"], "")),
                 "Set Code": safe_text(row.get(column_map["Set code"], "")),
-                "Set Name": safe_text(row.get(column_map["Set name"], "")),
+                "Set Name": normalize_tcg_set_name(row.get(column_map["Set name"], "")),
                 "Number": safe_text(row.get(column_map["Collector number"], "")),
                 "Rarity": normalize_tcg_rarity(row.get(column_map["Rarity"], "")),
                 "Condition": condition,
@@ -711,12 +721,13 @@ def _prepare_dual_manabox_rows(
                 "Product Name": row["Product Name_tcg"],
                 "Set Name": row["Set Name_tcg"],
                 "Number": row["Number_tcg"],
-                "Condition": row["Condition_tcg"]}
+                "Condition": row["Condition_tcg"],
+            }
             error_rows.append(build_error_row(payload, "Quantity mismatch between ManaBox pricing files"))
             continue
 
         standard_rows.append(
-            {
+                {
                 "TCGplayer Id": tcgplayer_id_lookup.get(safe_text(row["Scryfall ID_tcg"]), ""),
                 "Product Line": "Magic",
                 "Set Name": row["Set Name_tcg"],
