@@ -1,4 +1,5 @@
 from io import BytesIO
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -156,7 +157,8 @@ def test_process_files_tcgplayer_mode_routes_low_card_to_manapool():
     assert "Required Direct bump exceeded max allowed %" in result.manapool_preview_df.iloc[0]["Reason"]
 
 
-def test_process_files_dual_manabox_mode_compares_purchase_prices():
+@patch("pricing_logic.fetch_tcgplayer_ids_from_scryfall", return_value=({"abc-1": "111", "abc-2": "222"}, []))
+def test_process_files_dual_manabox_mode_compares_purchase_prices(mock_scryfall_lookup):
     result = process_files(
         settings=OptimizerSettings(max_direct_bump_pct=0.20, direct_min_listing_price=0.40),
         manabox_tcg_bytes=build_manabox_tcg_csv(),
@@ -169,3 +171,5 @@ def test_process_files_dual_manabox_mode_compares_purchase_prices():
     assert "Dual ManaBox pricing comparison" in result.direct_preview_df.iloc[0]["Reason"]
     assert list(result.direct_csv_df.columns) == EXPORT_COLUMNS
     assert list(result.manapool_csv_df.columns) == EXPORT_COLUMNS
+    assert set(result.direct_csv_df["TCGplayer Id"]) == {"111", "222"}
+    mock_scryfall_lookup.assert_called_once()
