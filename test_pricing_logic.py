@@ -172,4 +172,5 @@ def test_process_files_dual_manabox_mode_compares_purchase_prices(mock_scryfall_
     assert list(result.direct_csv_df.columns) == EXPORT_COLUMNS
     assert list(result.manapool_csv_df.columns) == EXPORT_COLUMNS
     assert set(result.direct_csv_df["TCGplayer Id"]) == {"111", "222"}
+    assert set(result.direct_csv_df["Rarity"]) == {"C"}
     mock_scryfall_lookup.assert_called_once()
