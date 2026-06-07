@@ -28,30 +28,36 @@ def build_tcg_csv() -> bytes:
                 "Product Line": "Magic",
                 "Set Name": "Set A",
                 "Product Name": "Alpha Card",
+                "Title": "",
                 "Number": "001",
                 "Rarity": "Rare",
                 "Condition": "Near Mint",
                 "TCG Market Price": "2.50",
                 "TCG Direct Low": "2.50",
+                "TCG Low Price With Shipping": "3.49",
                 "TCG Low Price": "1.00",
                 "Total Quantity": "2",
                 "Add to Quantity": "",
                 "TCG Marketplace Price": "",
+                "Photo URL": "",
             },
             {
                 "TCGplayer Id": "2",
                 "Product Line": "Magic",
                 "Set Name": "Set B",
                 "Product Name": "Budget Card",
+                "Title": "",
                 "Number": "002",
                 "Rarity": "Common",
                 "Condition": "Near Mint",
                 "TCG Market Price": "0.10",
                 "TCG Direct Low": "0.10",
+                "TCG Low Price With Shipping": "1.50",
                 "TCG Low Price": "0.10",
                 "Total Quantity": "1",
                 "Add to Quantity": "",
                 "TCG Marketplace Price": "",
+                "Photo URL": "",
             },
         ]
     )
@@ -174,4 +180,6 @@ def test_process_files_dual_manabox_mode_compares_purchase_prices(mock_scryfall_
     assert set(result.direct_csv_df["TCGplayer Id"]) == {"111", "222"}
     assert set(result.direct_csv_df["Rarity"]) == {"C"}
     assert set(result.direct_csv_df["Set Name"]) == {"Secret Lair Drop Series"}
+    assert set(result.direct_csv_df["Title"]) == {""}
+    assert set(result.direct_csv_df["Photo URL"]) == {""}
     mock_scryfall_lookup.assert_called_once()

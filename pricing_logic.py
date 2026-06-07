@@ -50,31 +50,37 @@ EXPORT_COLUMNS = [
     "Product Line",
     "Set Name",
     "Product Name",
+    "Title",
     "Number",
     "Rarity",
     "Condition",
     "TCG Market Price",
     "TCG Direct Low",
+    "TCG Low Price With Shipping",
     "TCG Low Price",
     "Total Quantity",
     "Add to Quantity",
     "TCG Marketplace Price",
+    "Photo URL",
 ]
 
 TCG_COLUMN_ALIASES = {
     "TCGplayer Id": ["tcgplayer id", "tcgplayerid"],
     "Product Line": ["product line", "productline"],
     "Set Name": ["set name", "setname"],
-    "Product Name": ["product name", "productname", "title"],
+    "Product Name": ["product name", "productname"],
+    "Title": ["title"],
     "Number": ["number"],
     "Rarity": ["rarity"],
     "Condition": ["condition"],
     "TCG Market Price": ["tcg market price", "tcgmarketprice"],
     "TCG Direct Low": ["tcg direct low", "tcgdirectlow"],
+    "TCG Low Price With Shipping": ["tcg low price with shipping", "tcglowpricewithshipping"],
     "TCG Low Price": ["tcg low price", "tcglowprice"],
     "TCG Marketplace Price": ["tcg marketplace price", "tcgmarketplaceprice"],
     "Total Quantity": ["total quantity", "totalquantity"],
     "Add to Quantity": ["add to quantity", "addtoquantity"],
+    "Photo URL": ["photo url", "photourl"],
 }
 
 TCG_REQUIRED_COLUMNS = [
@@ -472,14 +478,17 @@ def build_standard_export_row(
     product_line: Any,
     set_name: Any,
     product_name: Any,
+    title: Any,
     number: Any,
     rarity: Any,
     condition: Any,
     tcg_market_price: float | None,
     tcg_direct_low: float | None,
+    tcg_low_price_with_shipping: float | None,
     tcg_low_price: float | None,
     quantity: float,
     listing_price: float,
+    photo_url: Any,
 ) -> dict[str, Any]:
     quantity_text = str(normalize_quantity(quantity))
     return {
@@ -487,35 +496,42 @@ def build_standard_export_row(
         "Product Line": safe_text(product_line),
         "Set Name": safe_text(set_name),
         "Product Name": safe_text(product_name),
+        "Title": safe_text(title),
         "Number": safe_text(number),
         "Rarity": safe_text(rarity),
         "Condition": safe_text(condition),
         "TCG Market Price": f"{tcg_market_price:.2f}" if tcg_market_price is not None else "",
         "TCG Direct Low": f"{tcg_direct_low:.2f}" if tcg_direct_low is not None else "",
+        "TCG Low Price With Shipping": f"{tcg_low_price_with_shipping:.4f}" if tcg_low_price_with_shipping is not None else "",
         "TCG Low Price": f"{tcg_low_price:.2f}" if tcg_low_price is not None else "",
         "Total Quantity": quantity_text,
         "Add to Quantity": quantity_text,
         "TCG Marketplace Price": f"{listing_price:.2f}",
+        "Photo URL": safe_text(photo_url),
     }
 
 
 def build_tcg_upload_row(row: pd.Series, column_map: dict[str, str], quantity: float, listing_price: float) -> dict[str, Any]:
     market_price, _ = try_parse_number(row.get(column_map.get("TCG Market Price", ""), ""))
     direct_low, _ = try_parse_number(row.get(column_map.get("TCG Direct Low", ""), ""))
+    low_price_with_shipping, _ = try_parse_number(row.get(column_map.get("TCG Low Price With Shipping", ""), ""))
     low_price, _ = try_parse_number(row.get(column_map.get("TCG Low Price", ""), ""))
     return build_standard_export_row(
         tcgplayer_id=row.get(column_map.get("TCGplayer Id", ""), ""),
         product_line=row.get(column_map.get("Product Line", ""), ""),
         set_name=row.get(column_map.get("Set Name", ""), ""),
         product_name=row.get(column_map.get("Product Name", ""), ""),
+        title=row.get(column_map.get("Title", ""), ""),
         number=row.get(column_map.get("Number", ""), ""),
         rarity=row.get(column_map.get("Rarity", ""), ""),
         condition=row.get(column_map.get("Condition", ""), ""),
         tcg_market_price=market_price,
         tcg_direct_low=direct_low,
+        tcg_low_price_with_shipping=low_price_with_shipping,
         tcg_low_price=low_price,
         quantity=quantity,
         listing_price=listing_price,
+        photo_url=row.get(column_map.get("Photo URL", ""), ""),
     )
 
 
@@ -525,14 +541,17 @@ def build_manabox_export_row(row: dict[str, Any], listing_price: float) -> dict[
         product_line=row.get("Product Line", "Magic"),
         set_name=row.get("Set Name", ""),
         product_name=row.get("Product Name", ""),
+        title=row.get("Title", ""),
         number=row.get("Number", ""),
         rarity=row.get("Rarity", ""),
         condition=row.get("Condition", ""),
         tcg_market_price=row.get("TCG Market Price"),
         tcg_direct_low=row.get("TCG Direct Low"),
+        tcg_low_price_with_shipping=row.get("TCG Low Price With Shipping"),
         tcg_low_price=row.get("Manapool Base Price"),
         quantity=float(row["Quantity"]),
         listing_price=listing_price,
+        photo_url=row.get("Photo URL", ""),
     )
 
 
