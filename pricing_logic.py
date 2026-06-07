@@ -341,6 +341,34 @@ def normalize_tcg_set_name(set_name_value: Any) -> str:
     return set_name_map.get(normalized, set_name)
 
 
+def infer_tcg_rarity_from_scryfall(payload: dict[str, Any]) -> str:
+    layout = normalize_header(payload.get("layout"))
+    type_line = normalize_header(payload.get("type_line"))
+    promo_types = {normalize_header(value) for value in (payload.get("promo_types") or [])}
+
+    if layout == "token" or type_line.startswith("token "):
+        return "T"
+
+    # Some Secret Lair helper inserts are represented in Scryfall as "Card"
+    # even though TCGPlayer catalogs them under Token.
+    if type_line == "card" and "poster" in promo_types:
+        return "T"
+
+    return normalize_tcg_rarity(payload.get("rarity", ""))
+
+
+def infer_tcg_product_name_from_scryfall(payload: dict[str, Any], rarity_code: str) -> str:
+    product_name = safe_text(payload.get("name"))
+    layout = normalize_header(payload.get("layout"))
+    type_line = normalize_header(payload.get("type_line"))
+
+    if rarity_code == "T" and (layout == "token" or type_line.startswith("token ")):
+        if not product_name.lower().endswith(" token"):
+            return f"{product_name} Token"
+
+    return product_name
+
+
 def build_row_key(name: Any, set_code: Any, collector_number: Any, condition: Any, language: Any = "") -> str:
     parts = [
         normalize_header(name),
@@ -385,6 +413,49 @@ def fetch_tcgplayer_ids_from_scryfall(scryfall_ids: list[str]) -> tuple[dict[str
         resolved_ids[scryfall_id] = str(tcgplayer_id)
 
     return resolved_ids, unresolved_ids
+
+
+def fetch_tcgplayer_metadata_from_scryfall(scryfall_ids: list[str]) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    resolved_metadata: dict[str, dict[str, Any]] = {}
+    unresolved_ids: list[str] = []
+
+    unique_ids = []
+    seen_ids: set[str] = set()
+    for value in scryfall_ids:
+        scryfall_id = safe_text(value)
+        if not scryfall_id or scryfall_id in seen_ids:
+            continue
+        seen_ids.add(scryfall_id)
+        unique_ids.append(scryfall_id)
+
+    for scryfall_id in unique_ids:
+        request = Request(
+            SCRYFALL_CARD_API_TEMPLATE.format(scryfall_id=scryfall_id),
+            headers=SCRYFALL_HEADERS,
+            method="GET",
+        )
+        try:
+            with urlopen(request, timeout=10) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except (HTTPError, URLError, TimeoutError, ValueError, json.JSONDecodeError):
+            unresolved_ids.append(scryfall_id)
+            continue
+
+        tcgplayer_id = payload.get("tcgplayer_id")
+        if tcgplayer_id in {None, ""}:
+            unresolved_ids.append(scryfall_id)
+            continue
+
+        rarity_code = infer_tcg_rarity_from_scryfall(payload)
+        resolved_metadata[scryfall_id] = {
+            "TCGplayer Id": str(tcgplayer_id),
+            "Set Name": normalize_tcg_set_name(payload.get("set_name", "")),
+            "Product Name": infer_tcg_product_name_from_scryfall(payload, rarity_code),
+            "Number": safe_text(payload.get("collector_number", "")),
+            "Rarity": rarity_code,
+        }
+
+    return resolved_metadata, unresolved_ids
 
 
 def calculate_manapool_net(card_price: float, settings: OptimizerSettings) -> float:
@@ -700,7 +771,7 @@ def _prepare_dual_manabox_rows(
     if tcg_missing or mana_missing:
         return [], tcg_errors + mana_errors, sorted(set(tcg_missing + mana_missing)), None
 
-    tcgplayer_id_lookup, unresolved_scryfall_ids = fetch_tcgplayer_ids_from_scryfall(
+    scryfall_metadata_lookup, unresolved_scryfall_ids = fetch_tcgplayer_metadata_from_scryfall(
         tcg_df["Scryfall ID"].tolist() if not tcg_df.empty else []
     )
     enrichment_warning = None
@@ -745,14 +816,16 @@ def _prepare_dual_manabox_rows(
             error_rows.append(build_error_row(payload, "Quantity mismatch between ManaBox pricing files"))
             continue
 
+        scryfall_metadata = scryfall_metadata_lookup.get(safe_text(row["Scryfall ID_tcg"]), {})
+
         standard_rows.append(
-                {
-                "TCGplayer Id": tcgplayer_id_lookup.get(safe_text(row["Scryfall ID_tcg"]), ""),
+            {
+                "TCGplayer Id": scryfall_metadata.get("TCGplayer Id", ""),
                 "Product Line": "Magic",
-                "Set Name": row["Set Name_tcg"],
-                "Product Name": row["Product Name_tcg"],
-                "Number": row["Number_tcg"],
-                "Rarity": row["Rarity_tcg"],
+                "Set Name": scryfall_metadata.get("Set Name", row["Set Name_tcg"]),
+                "Product Name": scryfall_metadata.get("Product Name", row["Product Name_tcg"]),
+                "Number": scryfall_metadata.get("Number", row["Number_tcg"]),
+                "Rarity": scryfall_metadata.get("Rarity", row["Rarity_tcg"]),
                 "Condition": row["Condition_tcg"],
                 "Quantity": quantity_tcg,
                 "TCG Market Price": float(row["Price_tcg"]),

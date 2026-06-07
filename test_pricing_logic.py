@@ -163,7 +163,28 @@ def test_process_files_tcgplayer_mode_routes_low_card_to_manapool():
     assert "Required Direct bump exceeded max allowed %" in result.manapool_preview_df.iloc[0]["Reason"]
 
 
-@patch("pricing_logic.fetch_tcgplayer_ids_from_scryfall", return_value=({"abc-1": "111", "abc-2": "222"}, []))
+@patch(
+    "pricing_logic.fetch_tcgplayer_metadata_from_scryfall",
+    return_value=(
+        {
+            "abc-1": {
+                "TCGplayer Id": "111",
+                "Set Name": "Secret Lair Drop Series",
+                "Product Name": "Goblin Token",
+                "Number": "2421",
+                "Rarity": "T",
+            },
+            "abc-2": {
+                "TCGplayer Id": "222",
+                "Set Name": "Secret Lair Drop Series",
+                "Product Name": "Storm Counter",
+                "Number": "2422",
+                "Rarity": "T",
+            },
+        },
+        [],
+    ),
+)
 def test_process_files_dual_manabox_mode_compares_purchase_prices(mock_scryfall_lookup):
     result = process_files(
         settings=OptimizerSettings(max_direct_bump_pct=0.20, direct_min_listing_price=0.40),
@@ -178,8 +199,9 @@ def test_process_files_dual_manabox_mode_compares_purchase_prices(mock_scryfall_
     assert list(result.direct_csv_df.columns) == EXPORT_COLUMNS
     assert list(result.manapool_csv_df.columns) == EXPORT_COLUMNS
     assert set(result.direct_csv_df["TCGplayer Id"]) == {"111", "222"}
-    assert set(result.direct_csv_df["Rarity"]) == {"C"}
+    assert set(result.direct_csv_df["Rarity"]) == {"T"}
     assert set(result.direct_csv_df["Set Name"]) == {"Secret Lair Drop Series"}
+    assert set(result.direct_csv_df["Product Name"]) == {"Goblin Token", "Storm Counter"}
     assert set(result.direct_csv_df["Title"]) == {""}
     assert set(result.direct_csv_df["Photo URL"]) == {""}
     mock_scryfall_lookup.assert_called_once()
