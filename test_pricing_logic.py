@@ -3,6 +3,7 @@ from io import BytesIO
 import pandas as pd
 
 from pricing_logic import (
+    EXPORT_COLUMNS,
     OptimizerSettings,
     calculate_direct_bump_pct,
     calculate_manapool_net,
@@ -166,4 +167,5 @@ def test_process_files_dual_manabox_mode_compares_purchase_prices():
     assert len(result.direct_preview_df) == 2
     assert result.direct_preview_df.iloc[0]["Condition"] == "Near Mint Foil"
     assert "Dual ManaBox pricing comparison" in result.direct_preview_df.iloc[0]["Reason"]
-    assert "Set Code" in result.direct_csv_df.columns
+    assert list(result.direct_csv_df.columns) == EXPORT_COLUMNS
+    assert list(result.manapool_csv_df.columns) == EXPORT_COLUMNS
