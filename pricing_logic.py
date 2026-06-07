@@ -42,6 +42,22 @@ DISPLAY_COLUMNS_DIRECT = [
     "Reason",
 ]
 
+EXPORT_COLUMNS = [
+    "TCGplayer Id",
+    "Product Line",
+    "Set Name",
+    "Product Name",
+    "Number",
+    "Rarity",
+    "Condition",
+    "TCG Market Price",
+    "TCG Direct Low",
+    "TCG Low Price",
+    "Total Quantity",
+    "Add to Quantity",
+    "TCG Marketplace Price",
+]
+
 TCG_COLUMN_ALIASES = {
     "TCGplayer Id": ["tcgplayer id", "tcgplayerid"],
     "Product Line": ["product line", "productline"],
@@ -371,42 +387,74 @@ def build_analysis_dataframe(summary: dict[str, Any], settings: OptimizerSetting
     return pd.DataFrame(rows)
 
 
-def build_tcg_upload_row(row: pd.Series, source_columns: list[str], column_map: dict[str, str], quantity: float, listing_price: float) -> dict[str, Any]:
-    upload_row = {column: safe_text(row.get(column, "")) for column in source_columns}
-    formatted_price = f"{listing_price:.2f}"
-    formatted_quantity = str(normalize_quantity(quantity))
-    marketplace_price_column = column_map.get("TCG Marketplace Price")
-    if marketplace_price_column:
-        upload_row[marketplace_price_column] = formatted_price
-    add_to_quantity_column = column_map.get("Add to Quantity")
-    total_quantity_column = column_map.get("Total Quantity")
-    if add_to_quantity_column:
-        upload_row[add_to_quantity_column] = formatted_quantity
-    elif total_quantity_column:
-        upload_row[total_quantity_column] = formatted_quantity
-    return upload_row
+def build_standard_export_row(
+    *,
+    tcgplayer_id: Any,
+    product_line: Any,
+    set_name: Any,
+    product_name: Any,
+    number: Any,
+    rarity: Any,
+    condition: Any,
+    tcg_market_price: float | None,
+    tcg_direct_low: float | None,
+    tcg_low_price: float | None,
+    quantity: float,
+    listing_price: float,
+) -> dict[str, Any]:
+    quantity_text = str(normalize_quantity(quantity))
+    return {
+        "TCGplayer Id": safe_text(tcgplayer_id),
+        "Product Line": safe_text(product_line),
+        "Set Name": safe_text(set_name),
+        "Product Name": safe_text(product_name),
+        "Number": safe_text(number),
+        "Rarity": safe_text(rarity),
+        "Condition": safe_text(condition),
+        "TCG Market Price": f"{tcg_market_price:.2f}" if tcg_market_price is not None else "",
+        "TCG Direct Low": f"{tcg_direct_low:.2f}" if tcg_direct_low is not None else "",
+        "TCG Low Price": f"{tcg_low_price:.2f}" if tcg_low_price is not None else "",
+        "Total Quantity": quantity_text,
+        "Add to Quantity": quantity_text,
+        "TCG Marketplace Price": f"{listing_price:.2f}",
+    }
+
+
+def build_tcg_upload_row(row: pd.Series, column_map: dict[str, str], quantity: float, listing_price: float) -> dict[str, Any]:
+    market_price, _ = try_parse_number(row.get(column_map.get("TCG Market Price", ""), ""))
+    direct_low, _ = try_parse_number(row.get(column_map.get("TCG Direct Low", ""), ""))
+    low_price, _ = try_parse_number(row.get(column_map.get("TCG Low Price", ""), ""))
+    return build_standard_export_row(
+        tcgplayer_id=row.get(column_map.get("TCGplayer Id", ""), ""),
+        product_line=row.get(column_map.get("Product Line", ""), ""),
+        set_name=row.get(column_map.get("Set Name", ""), ""),
+        product_name=row.get(column_map.get("Product Name", ""), ""),
+        number=row.get(column_map.get("Number", ""), ""),
+        rarity=row.get(column_map.get("Rarity", ""), ""),
+        condition=row.get(column_map.get("Condition", ""), ""),
+        tcg_market_price=market_price,
+        tcg_direct_low=direct_low,
+        tcg_low_price=low_price,
+        quantity=quantity,
+        listing_price=listing_price,
+    )
 
 
 def build_manabox_export_row(row: dict[str, Any], listing_price: float) -> dict[str, Any]:
-    quantity = str(normalize_quantity(float(row["Quantity"])))
-    return {
-        "TCGplayer Id": safe_text(row.get("TCGplayer Id", "")),
-        "Product Line": "Magic",
-        "Set Name": safe_text(row.get("Set Name", "")),
-        "Product Name": safe_text(row.get("Product Name", "")),
-        "Number": safe_text(row.get("Number", "")),
-        "Rarity": safe_text(row.get("Rarity", "")),
-        "Condition": safe_text(row.get("Condition", "")),
-        "TCG Market Price": f"{float(row['TCG Market Price']):.2f}" if row.get("TCG Market Price") is not None else "",
-        "TCG Direct Low": f"{float(row['TCG Direct Low']):.2f}" if row.get("TCG Direct Low") is not None else "",
-        "TCG Low Price": f"{float(row['Manapool Base Price']):.2f}" if row.get("Manapool Base Price") is not None else "",
-        "Total Quantity": quantity,
-        "Add to Quantity": quantity,
-        "TCG Marketplace Price": f"{listing_price:.2f}",
-        "Set Code": safe_text(row.get("Set Code", "")),
-        "Scryfall ID": safe_text(row.get("Scryfall ID", "")),
-        "Language": safe_text(row.get("Language", "")),
-    }
+    return build_standard_export_row(
+        tcgplayer_id=row.get("TCGplayer Id", ""),
+        product_line=row.get("Product Line", "Magic"),
+        set_name=row.get("Set Name", ""),
+        product_name=row.get("Product Name", ""),
+        number=row.get("Number", ""),
+        rarity=row.get("Rarity", ""),
+        condition=row.get("Condition", ""),
+        tcg_market_price=row.get("TCG Market Price"),
+        tcg_direct_low=row.get("TCG Direct Low"),
+        tcg_low_price=row.get("Manapool Base Price"),
+        quantity=float(row["Quantity"]),
+        listing_price=listing_price,
+    )
 
 
 def _prepare_tcg_rows(tcgplayer_bytes: bytes) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
@@ -416,7 +464,6 @@ def _prepare_tcg_rows(tcgplayer_bytes: bytes) -> tuple[list[dict[str, Any]], lis
         error = build_error_row({"Source": "TCGPlayer CSV"}, f"Required CSV column missing: {', '.join(missing_columns)}")
         return [], [error], missing_columns
 
-    source_columns = list(df.columns)
     standard_rows: list[dict[str, Any]] = []
     error_rows: list[dict[str, Any]] = []
 
@@ -453,7 +500,7 @@ def _prepare_tcg_rows(tcgplayer_bytes: bytes) -> tuple[list[dict[str, Any]], lis
             row_errors.append("Missing both TCG Market Price and TCG Low Price")
 
         if row_errors:
-            error_rows.append(build_error_row({column: row.get(column, "") for column in source_columns}, "; ".join(dict.fromkeys(row_errors))))
+            error_rows.append(build_error_row({column: row.get(column, "") for column in df.columns}, "; ".join(dict.fromkeys(row_errors))))
             continue
 
         standard_rows.append(
@@ -471,7 +518,6 @@ def _prepare_tcg_rows(tcgplayer_bytes: bytes) -> tuple[list[dict[str, Any]], lis
                 "Manapool Base Price": low_price if low_price is not None else market_price,
                 "source_payload": {
                     "row": row.copy(),
-                    "source_columns": source_columns,
                     "column_map": column_map,
                 },
             }
@@ -725,7 +771,6 @@ def _build_output_rows(standard_rows: list[dict[str, Any]], settings: OptimizerS
                 direct_csv_rows.append(
                     build_tcg_upload_row(
                         payload["row"],
-                        payload["source_columns"],
                         payload["column_map"],
                         quantity,
                         direct_listing_price,
@@ -755,7 +800,6 @@ def _build_output_rows(standard_rows: list[dict[str, Any]], settings: OptimizerS
                 manapool_csv_rows.append(
                     build_tcg_upload_row(
                         payload["row"],
-                        payload["source_columns"],
                         payload["column_map"],
                         quantity,
                         manapool_price,
@@ -764,30 +808,8 @@ def _build_output_rows(standard_rows: list[dict[str, Any]], settings: OptimizerS
             else:
                 manapool_csv_rows.append(build_manabox_export_row(standard_row, manapool_price))
 
-    if source_mode == "tcgplayer":
-        manapool_csv_df = pd.DataFrame(manapool_csv_rows)
-        direct_csv_df = pd.DataFrame(direct_csv_rows)
-    else:
-        export_columns = [
-            "TCGplayer Id",
-            "Product Line",
-            "Set Name",
-            "Product Name",
-            "Number",
-            "Rarity",
-            "Condition",
-            "TCG Market Price",
-            "TCG Direct Low",
-            "TCG Low Price",
-            "Total Quantity",
-            "Add to Quantity",
-            "TCG Marketplace Price",
-            "Set Code",
-            "Scryfall ID",
-            "Language",
-        ]
-        manapool_csv_df = pd.DataFrame(manapool_csv_rows, columns=export_columns)
-        direct_csv_df = pd.DataFrame(direct_csv_rows, columns=export_columns)
+    manapool_csv_df = pd.DataFrame(manapool_csv_rows, columns=EXPORT_COLUMNS)
+    direct_csv_df = pd.DataFrame(direct_csv_rows, columns=EXPORT_COLUMNS)
 
     manapool_full_df = pd.DataFrame(manapool_rows, columns=DISPLAY_COLUMNS_MANAPOOL + ["_forced_min", "_bump_exceeded"])
     direct_full_df = pd.DataFrame(direct_rows, columns=DISPLAY_COLUMNS_DIRECT + ["_bump_exceeded"])
