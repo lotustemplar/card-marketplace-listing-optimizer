@@ -5,12 +5,17 @@ import pandas as pd
 from pricing_logic import (
     OptimizerSettings,
     calculate_direct_bump_pct,
-    calculate_direct_net,
     calculate_manapool_net,
     find_required_direct_price,
     lookup_direct_net,
     process_files,
 )
+
+
+def _csv_bytes(dataframe: pd.DataFrame) -> bytes:
+    buffer = BytesIO()
+    dataframe.to_csv(buffer, index=False)
+    return buffer.getvalue()
 
 
 def build_tcg_csv() -> bytes:
@@ -24,12 +29,12 @@ def build_tcg_csv() -> bytes:
                 "Number": "001",
                 "Rarity": "Rare",
                 "Condition": "Near Mint",
-                "TCG Market Price": "5.00",
-                "TCG Direct Low": "5.00",
-                "TCG Low Price": "2.50",
-                "TCG Marketplace Price": "",
+                "TCG Market Price": "2.50",
+                "TCG Direct Low": "2.50",
+                "TCG Low Price": "1.00",
                 "Total Quantity": "2",
                 "Add to Quantity": "",
+                "TCG Marketplace Price": "",
             },
             {
                 "TCGplayer Id": "2",
@@ -42,93 +47,123 @@ def build_tcg_csv() -> bytes:
                 "TCG Market Price": "0.10",
                 "TCG Direct Low": "0.10",
                 "TCG Low Price": "0.10",
-                "TCG Marketplace Price": "",
                 "Total Quantity": "1",
                 "Add to Quantity": "",
-            },
-            {
-                "TCGplayer Id": "3",
-                "Product Line": "Magic",
-                "Set Name": "Set C",
-                "Product Name": "Error Card",
-                "Number": "003",
-                "Rarity": "Uncommon",
-                "Condition": "Near Mint",
-                "TCG Market Price": "",
-                "TCG Direct Low": "",
-                "TCG Low Price": "",
                 "TCG Marketplace Price": "",
-                "Total Quantity": "0",
-                "Add to Quantity": "",
             },
         ]
     )
-    buffer = BytesIO()
-    dataframe.to_csv(buffer, index=False)
-    return buffer.getvalue()
+    return _csv_bytes(dataframe)
+
+
+def build_manabox_tcg_csv() -> bytes:
+    dataframe = pd.DataFrame(
+        [
+            {
+                "Name": "Goblin",
+                "Set code": "SLD",
+                "Set name": "Secret Lair Drop",
+                "Collector number": "2421",
+                "Foil": "foil",
+                "Rarity": "common",
+                "Quantity": "2",
+                "Scryfall ID": "abc-1",
+                "Purchase price": "6.00",
+                "Condition": "near_mint",
+                "Language": "en",
+            },
+            {
+                "Name": "Storm Counter",
+                "Set code": "SLD",
+                "Set name": "Secret Lair Drop",
+                "Collector number": "2422",
+                "Foil": "foil",
+                "Rarity": "common",
+                "Quantity": "1",
+                "Scryfall ID": "abc-2",
+                "Purchase price": "14.20",
+                "Condition": "near_mint",
+                "Language": "en",
+            },
+        ]
+    )
+    return _csv_bytes(dataframe)
+
+
+def build_manabox_manapool_csv() -> bytes:
+    dataframe = pd.DataFrame(
+        [
+            {
+                "Name": "Goblin",
+                "Set code": "SLD",
+                "Set name": "Secret Lair Drop",
+                "Collector number": "2421",
+                "Foil": "foil",
+                "Rarity": "common",
+                "Quantity": "2",
+                "Scryfall ID": "abc-1",
+                "Purchase price": "5.00",
+                "Condition": "near_mint",
+                "Language": "en",
+            },
+            {
+                "Name": "Storm Counter",
+                "Set code": "SLD",
+                "Set name": "Secret Lair Drop",
+                "Collector number": "2422",
+                "Foil": "foil",
+                "Rarity": "common",
+                "Quantity": "1",
+                "Scryfall ID": "abc-2",
+                "Purchase price": "10.00",
+                "Condition": "near_mint",
+                "Language": "en",
+            },
+        ]
+    )
+    return _csv_bytes(dataframe)
 
 
 def test_manapool_net_calculation():
     settings = OptimizerSettings()
-    assert calculate_manapool_net(1.00, settings) == 0.91
+    assert calculate_manapool_net(1.00, settings) == 0.92
 
 
-def test_direct_net_calculation_below_250():
-    assert calculate_direct_net(2.00) == 1.00
-
-
-def test_direct_net_calculation_at_or_above_250():
-    assert calculate_direct_net(3.00) == 1.54
+def test_direct_net_uses_builtin_floor():
+    settings = OptimizerSettings(direct_min_listing_price=0.40)
+    assert lookup_direct_net(0.10, settings) == 0.20
 
 
 def test_required_direct_price_search_finds_first_qualifying_price():
-    assert find_required_direct_price(1.41) == 2.86
+    settings = OptimizerSettings(direct_min_listing_price=0.40)
+    assert find_required_direct_price(0.23, settings) == 0.45
 
 
 def test_direct_bump_percent_calculation():
-    assert round(calculate_direct_bump_pct(2.50, 2.89), 4) == 0.156
+    assert round(calculate_direct_bump_pct(2.50, 2.99), 4) == 0.196
 
 
-def test_lookup_direct_net_uses_new_formula():
-    assert lookup_direct_net(4.00) == 2.42
-
-
-def test_process_files_assigns_rows_and_records_errors_without_api_credentials():
+def test_process_files_tcgplayer_mode_routes_low_card_to_manapool():
     result = process_files(
+        settings=OptimizerSettings(max_direct_bump_pct=0.20, direct_min_listing_price=0.40),
         tcgplayer_bytes=build_tcg_csv(),
-        settings=OptimizerSettings(),
-        manapool_api_key=None,
-        manapool_email=None,
     )
 
     assert len(result.manapool_preview_df) == 1
     assert len(result.direct_preview_df) == 1
-    assert len(result.errors_df) == 1
-    assert result.manapool_preview_df.iloc[0]["Manapool Price"] == 0.25
-    assert "Forced to Manapool minimum" in result.manapool_preview_df.iloc[0]["Reason"]
-    assert result.direct_preview_df.iloc[0]["Direct Listing Price"] == 5.00
+    assert result.manapool_preview_df.iloc[0]["Product Name"] == "Budget Card"
+    assert "Required Direct bump exceeded max allowed %" in result.manapool_preview_df.iloc[0]["Reason"]
 
 
-def test_missing_required_columns_go_to_errors_sheet():
-    dataframe = pd.DataFrame(
-        [
-            {
-                "TCGplayer Id": "1",
-                "Product Line": "Magic",
-                "Set Name": "Set A",
-                "Product Name": "Alpha Card",
-                "TCG Market Price": "5.00",
-            }
-        ]
-    )
-    buffer = BytesIO()
-    dataframe.to_csv(buffer, index=False)
-
+def test_process_files_dual_manabox_mode_compares_purchase_prices():
     result = process_files(
-        tcgplayer_bytes=buffer.getvalue(),
-        settings=OptimizerSettings(),
+        settings=OptimizerSettings(max_direct_bump_pct=0.20, direct_min_listing_price=0.40),
+        manabox_tcg_bytes=build_manabox_tcg_csv(),
+        manabox_manapool_bytes=build_manabox_manapool_csv(),
     )
 
-    assert result.missing_columns
-    assert not result.errors_df.empty
-    assert "Required CSV column missing" in result.errors_df.iloc[0]["Error reason"]
+    assert result.source_mode == "dual_manabox"
+    assert len(result.direct_preview_df) == 2
+    assert result.direct_preview_df.iloc[0]["Condition"] == "Near Mint Foil"
+    assert "Dual ManaBox pricing comparison" in result.direct_preview_df.iloc[0]["Reason"]
+    assert "Set Code" in result.direct_csv_df.columns
