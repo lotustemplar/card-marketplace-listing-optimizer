@@ -11,7 +11,7 @@ from pricing_logic import OptimizerSettings, process_files
 from workbook_writer import build_workbook
 
 
-APP_VERSION = "3.3"
+APP_VERSION = "3.4"
 
 st.set_page_config(
     page_title="Card Marketplace Listing Optimizer",
@@ -47,6 +47,7 @@ def require_password_if_needed() -> None:
 
 def build_settings() -> OptimizerSettings:
     st.sidebar.header("Settings")
+    st.sidebar.caption(f"App version {APP_VERSION}")
     return OptimizerSettings(
         manapool_min_price=st.sidebar.number_input("Manapool minimum price ($)", min_value=0.01, value=0.25, step=0.01, format="%.2f"),
         manapool_platform_fee=st.sidebar.number_input("Manapool platform fee (%)", min_value=0.0, value=5.0, step=0.1, format="%.1f") / 100,
@@ -186,6 +187,7 @@ def main() -> None:
 
     st.title("Card Marketplace Listing Optimizer")
     st.caption(f"Compare TCGPlayer Direct vs Manapool and generate optimized listing sheets. App version {APP_VERSION}.")
+    st.markdown(f"**App version:** `{APP_VERSION}`")
     st.info("Use either a native TCGPlayer export or two ManaBox pricing exports with the same inventory slice: one priced to TCGPlayer market and one priced to Manapool market. Dual ManaBox mode now fills TCGplayer Id from each row's Scryfall ID when available.")
 
     mode = st.radio("Input mode", ["TCGPlayer CSV", "Dual ManaBox Pricing CSVs"], horizontal=True)
