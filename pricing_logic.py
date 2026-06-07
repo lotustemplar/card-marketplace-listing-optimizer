@@ -300,6 +300,31 @@ def normalize_condition(condition_value: Any, foil_value: Any = None) -> str:
     return condition
 
 
+def normalize_tcg_rarity(rarity_value: Any) -> str:
+    rarity_text = safe_text(rarity_value).strip()
+    if rarity_text == "":
+        return ""
+
+    normalized = normalize_header(rarity_text)
+    rarity_map = {
+        "common": "C",
+        "uncommon": "U",
+        "rare": "R",
+        "mythic": "M",
+        "mythic rare": "M",
+        "token": "T",
+        "land": "L",
+        "basic land": "L",
+    }
+    if normalized in rarity_map:
+        return rarity_map[normalized]
+
+    if len(rarity_text) == 1:
+        return rarity_text.upper()
+
+    return rarity_text.upper()
+
+
 def build_row_key(name: Any, set_code: Any, collector_number: Any, condition: Any, language: Any = "") -> str:
     parts = [
         normalize_header(name),
@@ -603,7 +628,7 @@ def _prepare_manabox_price_rows(file_bytes: bytes, price_label: str) -> tuple[pd
                 "Set Code": safe_text(row.get(column_map["Set code"], "")),
                 "Set Name": safe_text(row.get(column_map["Set name"], "")),
                 "Number": safe_text(row.get(column_map["Collector number"], "")),
-                "Rarity": safe_text(row.get(column_map["Rarity"], "")),
+                "Rarity": normalize_tcg_rarity(row.get(column_map["Rarity"], "")),
                 "Condition": condition,
                 "Language": safe_text(row.get(column_map.get("Language", ""), "")),
                 "Scryfall ID": safe_text(row.get(column_map.get("Scryfall ID", ""), "")),
@@ -686,8 +711,7 @@ def _prepare_dual_manabox_rows(
                 "Product Name": row["Product Name_tcg"],
                 "Set Name": row["Set Name_tcg"],
                 "Number": row["Number_tcg"],
-                "Condition": row["Condition_tcg"],
-            }
+                "Condition": row["Condition_tcg"]}
             error_rows.append(build_error_row(payload, "Quantity mismatch between ManaBox pricing files"))
             continue
 
