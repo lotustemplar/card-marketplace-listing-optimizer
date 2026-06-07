@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import json
 from io import BytesIO
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 import pandas as pd
 
@@ -107,6 +110,12 @@ MANABOX_REQUIRED_COLUMNS = [
     "Purchase price",
     "Condition",
 ]
+
+SCRYFALL_CARD_API_TEMPLATE = "https://api.scryfall.com/cards/{scryfall_id}"
+SCRYFALL_HEADERS = {
+    "User-Agent": "CardMarketplaceListingOptimizer/3.2",
+    "Accept": "application/json;q=0.9,*/*;q=0.8",
+}
 
 PERCENT_SETTING_FIELDS = {
     "manapool_platform_fee",
@@ -300,6 +309,41 @@ def build_row_key(name: Any, set_code: Any, collector_number: Any, condition: An
         normalize_header(language),
     ]
     return "||".join(parts)
+
+
+def fetch_tcgplayer_ids_from_scryfall(scryfall_ids: list[str]) -> tuple[dict[str, str], list[str]]:
+    resolved_ids: dict[str, str] = {}
+    unresolved_ids: list[str] = []
+
+    unique_ids = []
+    seen_ids: set[str] = set()
+    for value in scryfall_ids:
+        scryfall_id = safe_text(value)
+        if not scryfall_id or scryfall_id in seen_ids:
+            continue
+        seen_ids.add(scryfall_id)
+        unique_ids.append(scryfall_id)
+
+    for scryfall_id in unique_ids:
+        request = Request(
+            SCRYFALL_CARD_API_TEMPLATE.format(scryfall_id=scryfall_id),
+            headers=SCRYFALL_HEADERS,
+            method="GET",
+        )
+        try:
+            with urlopen(request, timeout=10) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except (HTTPError, URLError, TimeoutError, ValueError, json.JSONDecodeError):
+            unresolved_ids.append(scryfall_id)
+            continue
+
+        tcgplayer_id = payload.get("tcgplayer_id")
+        if tcgplayer_id in {None, ""}:
+            unresolved_ids.append(scryfall_id)
+            continue
+        resolved_ids[scryfall_id] = str(tcgplayer_id)
+
+    return resolved_ids, unresolved_ids
 
 
 def calculate_manapool_net(card_price: float, settings: OptimizerSettings) -> float:
@@ -593,11 +637,24 @@ def _prepare_manabox_price_rows(file_bytes: bytes, price_label: str) -> tuple[pd
     return pd.DataFrame(aggregated_rows), errors, []
 
 
-def _prepare_dual_manabox_rows(tcg_market_bytes: bytes, manapool_market_bytes: bytes) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+def _prepare_dual_manabox_rows(
+    tcg_market_bytes: bytes,
+    manapool_market_bytes: bytes,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], str | None]:
     tcg_df, tcg_errors, tcg_missing = _prepare_manabox_price_rows(tcg_market_bytes, "ManaBox TCG pricing CSV")
     mana_df, mana_errors, mana_missing = _prepare_manabox_price_rows(manapool_market_bytes, "ManaBox Manapool pricing CSV")
     if tcg_missing or mana_missing:
-        return [], tcg_errors + mana_errors, sorted(set(tcg_missing + mana_missing))
+        return [], tcg_errors + mana_errors, sorted(set(tcg_missing + mana_missing)), None
+
+    tcgplayer_id_lookup, unresolved_scryfall_ids = fetch_tcgplayer_ids_from_scryfall(
+        tcg_df["Scryfall ID"].tolist() if not tcg_df.empty else []
+    )
+    enrichment_warning = None
+    if unresolved_scryfall_ids:
+        enrichment_warning = (
+            f"Scryfall could not resolve {len(unresolved_scryfall_ids)} TCGplayer ID(s) in Dual ManaBox mode. "
+            "Those export rows were left blank in TCGplayer Id."
+        )
 
     merged = tcg_df.merge(
         mana_df,
@@ -636,7 +693,7 @@ def _prepare_dual_manabox_rows(tcg_market_bytes: bytes, manapool_market_bytes: b
 
         standard_rows.append(
             {
-                "TCGplayer Id": "",
+                "TCGplayer Id": tcgplayer_id_lookup.get(safe_text(row["Scryfall ID_tcg"]), ""),
                 "Product Line": "Magic",
                 "Set Name": row["Set Name_tcg"],
                 "Product Name": row["Product Name_tcg"],
@@ -654,10 +711,15 @@ def _prepare_dual_manabox_rows(tcg_market_bytes: bytes, manapool_market_bytes: b
             }
         )
 
-    return standard_rows, error_rows, []
+    return standard_rows, error_rows, [], enrichment_warning
 
 
-def _build_output_rows(standard_rows: list[dict[str, Any]], settings: OptimizerSettings, source_mode: str) -> ProcessResult:
+def _build_output_rows(
+    standard_rows: list[dict[str, Any]],
+    settings: OptimizerSettings,
+    source_mode: str,
+    warning_message: str | None = None,
+) -> ProcessResult:
     manapool_rows: list[dict[str, Any]] = []
     direct_rows: list[dict[str, Any]] = []
     manapool_csv_rows: list[dict[str, Any]] = []
@@ -850,12 +912,16 @@ def _build_output_rows(standard_rows: list[dict[str, Any]], settings: OptimizerS
         "tracked_shipping_review_count": tracked_shipping_review_count,
     }
 
-    warning_message = None
+    combined_warning_message = warning_message
     if source_mode == "dual_manabox":
-        warning_message = "Dual ManaBox mode compares Purchase price from your TCG-priced export against Purchase price from your Manapool-priced export."
+        dual_mode_message = (
+            "Dual ManaBox mode compares Purchase price from your TCG-priced export against "
+            "Purchase price from your Manapool-priced export."
+        )
+        combined_warning_message = dual_mode_message if combined_warning_message is None else f"{combined_warning_message}\n\n{dual_mode_message}"
     if tracked_shipping_review_count:
         tracked_warning = f"{tracked_shipping_review_count} Manapool listing(s) are at or above ${settings.tracked_shipping_threshold:.2f} and may need manual tracked-shipping review."
-        warning_message = tracked_warning if warning_message is None else f"{warning_message}\n\n{tracked_warning}"
+        combined_warning_message = tracked_warning if combined_warning_message is None else f"{combined_warning_message}\n\n{tracked_warning}"
 
     analysis_df = build_analysis_dataframe(summary, settings)
 
@@ -871,7 +937,7 @@ def _build_output_rows(standard_rows: list[dict[str, Any]], settings: OptimizerS
         summary=summary,
         settings=settings,
         missing_columns=[],
-        warning_message=warning_message,
+        warning_message=combined_warning_message,
         source_mode=source_mode,
     )
 
@@ -926,7 +992,7 @@ def process_files(
         return result
 
     if manabox_tcg_bytes and manabox_manapool_bytes:
-        standard_rows, error_rows, missing_columns = _prepare_dual_manabox_rows(manabox_tcg_bytes, manabox_manapool_bytes)
+        standard_rows, error_rows, missing_columns, enrichment_warning = _prepare_dual_manabox_rows(manabox_tcg_bytes, manabox_manapool_bytes)
         if missing_columns:
             empty_summary = {
                 "total_rows_imported": 0,
@@ -960,7 +1026,7 @@ def process_files(
                 warning_message="Required columns are missing from one or both ManaBox CSV files.",
                 source_mode="dual_manabox",
             )
-        result = _build_output_rows(standard_rows, settings, "dual_manabox")
+        result = _build_output_rows(standard_rows, settings, "dual_manabox", enrichment_warning)
         if error_rows:
             result.errors_df = pd.concat([result.errors_df, pd.DataFrame(error_rows)], ignore_index=True)
             result.summary["skipped_error_rows"] = len(result.errors_df)
