@@ -628,6 +628,7 @@ def build_manabox_export_row(row: dict[str, Any], listing_price: float) -> dict[
 
 def _prepare_tcg_rows(tcgplayer_bytes: bytes) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     df = parse_csv_bytes(tcgplayer_bytes)
+    source_columns = list(df.columns)
     column_map, missing_columns = map_columns(df, TCG_COLUMN_ALIASES, TCG_REQUIRED_COLUMNS)
     if missing_columns:
         error = build_error_row({"Source": "TCGPlayer CSV"}, f"Required CSV column missing: {', '.join(missing_columns)}")
