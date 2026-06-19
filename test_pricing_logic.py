@@ -64,6 +64,50 @@ def build_tcg_csv() -> bytes:
     return _csv_bytes(dataframe)
 
 
+def build_tcg_csv_with_market_fallbacks() -> bytes:
+    dataframe = pd.DataFrame(
+        [
+            {
+                "TCGplayer Id": "3",
+                "Product Line": "Magic",
+                "Set Name": "Set C",
+                "Product Name": "Low Price Fallback Card",
+                "Title": "",
+                "Number": "003",
+                "Rarity": "Common",
+                "Condition": "Near Mint",
+                "TCG Market Price": "",
+                "TCG Direct Low": "",
+                "TCG Low Price With Shipping": "1.75",
+                "TCG Low Price": "0.32",
+                "Total Quantity": "2",
+                "Add to Quantity": "",
+                "TCG Marketplace Price": "",
+                "Photo URL": "",
+            },
+            {
+                "TCGplayer Id": "4",
+                "Product Line": "Magic",
+                "Set Name": "Set D",
+                "Product Name": "Direct Low Fallback Card",
+                "Title": "",
+                "Number": "004",
+                "Rarity": "Uncommon",
+                "Condition": "Near Mint",
+                "TCG Market Price": "",
+                "TCG Direct Low": "0.55",
+                "TCG Low Price With Shipping": "1.90",
+                "TCG Low Price": "",
+                "Total Quantity": "1",
+                "Add to Quantity": "",
+                "TCG Marketplace Price": "",
+                "Photo URL": "",
+            },
+        ]
+    )
+    return _csv_bytes(dataframe)
+
+
 def build_manabox_tcg_csv() -> bytes:
     dataframe = pd.DataFrame(
         [
@@ -161,6 +205,23 @@ def test_process_files_tcgplayer_mode_routes_low_card_to_manapool():
     assert len(result.direct_preview_df) == 1
     assert result.manapool_preview_df.iloc[0]["Product Name"] == "Budget Card"
     assert "Required Direct bump exceeded max allowed %" in result.manapool_preview_df.iloc[0]["Reason"]
+
+
+def test_process_files_tcgplayer_mode_uses_low_or_direct_when_market_missing():
+    result = process_files(
+        settings=OptimizerSettings(max_direct_bump_pct=0.20, direct_min_listing_price=0.40),
+        tcgplayer_bytes=build_tcg_csv_with_market_fallbacks(),
+    )
+
+    assert result.summary["skipped_error_rows"] == 0
+    assert len(result.direct_preview_df) + len(result.manapool_preview_df) == 2
+    combined_csv_df = pd.concat([result.direct_csv_df, result.manapool_csv_df], ignore_index=True)
+    low_fallback_row = combined_csv_df[combined_csv_df["Product Name"] == "Low Price Fallback Card"]
+    direct_fallback_row = combined_csv_df[combined_csv_df["Product Name"] == "Direct Low Fallback Card"]
+    assert not low_fallback_row.empty
+    assert not direct_fallback_row.empty
+    assert low_fallback_row.iloc[0]["TCG Market Price"] == "0.32"
+    assert direct_fallback_row.iloc[0]["TCG Market Price"] == "0.55"
 
 
 @patch(

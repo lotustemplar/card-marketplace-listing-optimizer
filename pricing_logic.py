@@ -587,6 +587,9 @@ def build_tcg_upload_row(row: pd.Series, column_map: dict[str, str], quantity: f
     direct_low, _ = try_parse_number(row.get(column_map.get("TCG Direct Low", ""), ""))
     low_price_with_shipping, _ = try_parse_number(row.get(column_map.get("TCG Low Price With Shipping", ""), ""))
     low_price, _ = try_parse_number(row.get(column_map.get("TCG Low Price", ""), ""))
+    effective_market_price = market_price
+    if effective_market_price is None:
+        effective_market_price = direct_low if direct_low is not None else low_price
     return build_standard_export_row(
         tcgplayer_id=row.get(column_map.get("TCGplayer Id", ""), ""),
         product_line=row.get(column_map.get("Product Line", ""), ""),
@@ -596,7 +599,7 @@ def build_tcg_upload_row(row: pd.Series, column_map: dict[str, str], quantity: f
         number=row.get(column_map.get("Number", ""), ""),
         rarity=row.get(column_map.get("Rarity", ""), ""),
         condition=row.get(column_map.get("Condition", ""), ""),
-        tcg_market_price=market_price,
+        tcg_market_price=effective_market_price,
         tcg_direct_low=direct_low,
         tcg_low_price_with_shipping=low_price_with_shipping,
         tcg_low_price=low_price,
@@ -664,10 +667,12 @@ def _prepare_tcg_rows(tcgplayer_bytes: bytes) -> tuple[list[dict[str, Any]], lis
         direct_low = parsed_values.get("direct_low")
         low_price = parsed_values.get("low_price")
 
-        if market_price is None and direct_low is None:
-            row_errors.append("Missing both TCG Market Price and TCG Direct Low")
-        if market_price is None and low_price is None:
-            row_errors.append("Missing both TCG Market Price and TCG Low Price")
+        effective_market_price = market_price
+        if effective_market_price is None:
+            effective_market_price = direct_low if direct_low is not None else low_price
+
+        if effective_market_price is None:
+            row_errors.append("Missing TCG Market Price, TCG Direct Low, and TCG Low Price")
 
         if row_errors:
             error_rows.append(build_error_row({column: row.get(column, "") for column in source_columns}, "; ".join(dict.fromkeys(row_errors))))
@@ -683,9 +688,9 @@ def _prepare_tcg_rows(tcgplayer_bytes: bytes) -> tuple[list[dict[str, Any]], lis
                 "Rarity": safe_text(row.get(column_map.get("Rarity", ""), "")),
                 "Condition": safe_text(row.get(column_map.get("Condition", ""), "")),
                 "Quantity": float(quantity),
-                "TCG Market Price": market_price,
+                "TCG Market Price": effective_market_price,
                 "TCG Direct Low": direct_low,
-                "Manapool Base Price": low_price if low_price is not None else market_price,
+                "Manapool Base Price": low_price if low_price is not None else effective_market_price,
                 "source_payload": {
                     "row": row.copy(),
                     "column_map": column_map,
