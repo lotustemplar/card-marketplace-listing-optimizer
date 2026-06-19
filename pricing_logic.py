@@ -341,6 +341,10 @@ def normalize_tcg_set_name(set_name_value: Any) -> str:
     return set_name_map.get(normalized, set_name)
 
 
+def is_manapool_supported_product_line(product_line_value: Any) -> bool:
+    return normalize_header(product_line_value) == "magic"
+
+
 def infer_tcg_rarity_from_scryfall(payload: dict[str, Any]) -> str:
     layout = normalize_header(payload.get("layout"))
     type_line = normalize_header(payload.get("type_line"))
@@ -890,6 +894,7 @@ def _build_output_rows(
 
         manapool_net = calculate_manapool_net(manapool_price, settings)
         all_manapool_estimated_net += manapool_net * quantity
+        manapool_supported = is_manapool_supported_product_line(standard_row.get("Product Line", ""))
 
         if direct_low is None:
             raw_base_direct_price = market_price
@@ -920,7 +925,13 @@ def _build_output_rows(
         if forced_min:
             reason_parts.append("Forced to Manapool minimum")
 
-        if direct_listing_price is None or direct_net is None or direct_bump_pct is None:
+        if not manapool_supported:
+            destination = "direct"
+            reason_parts.append("Non-MTG product line routed to TCGPlayer because Manapool only supports Magic")
+            if raw_base_direct_price is not None and raw_base_direct_price < settings.direct_min_listing_price:
+                reason_parts.append("Direct floor enforced at minimum price")
+            bump_exceeded = False
+        elif direct_listing_price is None or direct_net is None or direct_bump_pct is None:
             destination = "manapool"
             direct_bump_exceeded_count += 1
             reason_parts.append("Unable to price Direct listing")

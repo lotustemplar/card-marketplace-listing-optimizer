@@ -108,6 +108,32 @@ def build_tcg_csv_with_market_fallbacks() -> bytes:
     return _csv_bytes(dataframe)
 
 
+def build_non_mtg_tcg_csv() -> bytes:
+    dataframe = pd.DataFrame(
+        [
+            {
+                "TCGplayer Id": "5",
+                "Product Line": "Weiss Schwarz",
+                "Set Name": "Set E",
+                "Product Name": "Non MTG Card",
+                "Title": "",
+                "Number": "005",
+                "Rarity": "Rare",
+                "Condition": "Near Mint",
+                "TCG Market Price": "0.22",
+                "TCG Direct Low": "",
+                "TCG Low Price With Shipping": "1.60",
+                "TCG Low Price": "0.12",
+                "Total Quantity": "1",
+                "Add to Quantity": "",
+                "TCG Marketplace Price": "",
+                "Photo URL": "",
+            },
+        ]
+    )
+    return _csv_bytes(dataframe)
+
+
 def build_manabox_tcg_csv() -> bytes:
     dataframe = pd.DataFrame(
         [
@@ -222,6 +248,18 @@ def test_process_files_tcgplayer_mode_uses_low_or_direct_when_market_missing():
     assert not direct_fallback_row.empty
     assert low_fallback_row.iloc[0]["TCG Market Price"] == "0.32"
     assert direct_fallback_row.iloc[0]["TCG Market Price"] == "0.55"
+
+
+def test_process_files_non_mtg_routes_to_direct():
+    result = process_files(
+        settings=OptimizerSettings(max_direct_bump_pct=0.20, direct_min_listing_price=0.40),
+        tcgplayer_bytes=build_non_mtg_tcg_csv(),
+    )
+
+    assert len(result.direct_preview_df) == 1
+    assert len(result.manapool_preview_df) == 0
+    assert result.direct_preview_df.iloc[0]["Product Line"] == "Weiss Schwarz"
+    assert "Non-MTG product line routed to TCGPlayer because Manapool only supports Magic" in result.direct_preview_df.iloc[0]["Reason"]
 
 
 @patch(
