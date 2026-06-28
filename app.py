@@ -11,7 +11,7 @@ from pricing_logic import OptimizerSettings, process_files
 from workbook_writer import build_workbook
 
 
-APP_VERSION = "4.0"
+APP_VERSION = "4.1"
 
 st.set_page_config(
     page_title="Card Marketplace Listing Optimizer",
@@ -163,20 +163,59 @@ def main() -> None:
     st.markdown(
         """
         <style>
-        .block-container {padding-top: 2rem; padding-bottom: 2rem;}
+        .block-container {
+            padding-top: 2rem;
+            padding-bottom: 2rem;
+        }
+
+        :root {
+            --cmlo-panel: #131c26;
+            --cmlo-panel-alt: #182330;
+            --cmlo-border: #243446;
+            --cmlo-text: #e6edf5;
+            --cmlo-text-muted: #9fb0c3;
+            --cmlo-shadow: rgba(0, 0, 0, 0.22);
+        }
+
         div[data-testid="stMetric"] {
-            background: #ffffff;
-            border: 1px solid #d9e2ec;
+            background: linear-gradient(180deg, var(--cmlo-panel) 0%, var(--cmlo-panel-alt) 100%);
+            border: 1px solid var(--cmlo-border);
             border-radius: 14px;
             padding: 0.85rem 1rem;
-            box-shadow: 0 8px 24px rgba(15, 76, 92, 0.06);
+            box-shadow: 0 10px 26px var(--cmlo-shadow);
         }
+
+        div[data-testid="stMetric"] label,
+        div[data-testid="stMetric"] [data-testid="stMetricLabel"] {
+            color: var(--cmlo-text-muted) !important;
+        }
+
+        div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+            color: var(--cmlo-text) !important;
+        }
+
         .upload-panel {
-            border: 1px solid #d9e2ec;
+            border: 1px solid var(--cmlo-border);
             border-radius: 16px;
             padding: 1rem 1.25rem;
-            background: linear-gradient(180deg, #ffffff 0%, #f8fbfc 100%);
+            background: linear-gradient(180deg, rgba(19, 28, 38, 0.96) 0%, rgba(24, 35, 48, 0.96) 100%);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
             margin-bottom: 1rem;
+        }
+
+        div[data-testid="stAlert"] {
+            border-radius: 14px;
+            border: 1px solid var(--cmlo-border);
+        }
+
+        div[data-testid="stAlert"][data-baseweb="notification"] {
+            background: linear-gradient(180deg, rgba(19, 28, 38, 0.96) 0%, rgba(24, 35, 48, 0.96) 100%);
+        }
+
+        div[data-testid="stDataFrame"] {
+            border: 1px solid var(--cmlo-border);
+            border-radius: 14px;
+            overflow: hidden;
         }
         </style>
         """,
