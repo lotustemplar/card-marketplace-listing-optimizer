@@ -117,6 +117,31 @@ MANABOX_REQUIRED_COLUMNS = [
     "Condition",
 ]
 
+SCAN_EXPORT_COLUMN_ALIASES = {
+    "game": ["game"],
+    "set": ["set"],
+    "card_name": ["card name", "card_name", "cardname"],
+    "card_number": ["card number", "card_number", "cardnumber"],
+    "variant": ["variant"],
+    "condition": ["condition"],
+    "language": ["language"],
+    "tcgplayer_id": ["tcgplayer id", "tcgplayer_id", "tcgplayerid"],
+    "manapool_id": ["manapool id", "manapool_id", "manapoolid"],
+    "market_price": ["market price", "market_price", "marketprice"],
+    "manapool_price": ["manapool price", "manapool_price", "manapoolprice"],
+}
+
+SCAN_EXPORT_REQUIRED_COLUMNS = [
+    "game",
+    "set",
+    "card_name",
+    "card_number",
+    "variant",
+    "condition",
+    "language",
+    "tcgplayer_id",
+]
+
 SCRYFALL_CARD_API_TEMPLATE = "https://api.scryfall.com/cards/{scryfall_id}"
 SCRYFALL_HEADERS = {
     "User-Agent": "CardMarketplaceListingOptimizer/3.2",
@@ -296,7 +321,22 @@ def normalize_quantity(quantity: float) -> int | float:
 
 
 def normalize_condition(condition_value: Any, foil_value: Any = None) -> str:
-    condition = safe_text(condition_value).replace("_", " ").strip().title()
+    condition_text = safe_text(condition_value).replace("_", " ").strip()
+    normalized_condition = normalize_header(condition_text)
+    condition_map = {
+        "nm": "Near Mint",
+        "near mint": "Near Mint",
+        "lp": "Lightly Played",
+        "lightly played": "Lightly Played",
+        "mp": "Moderately Played",
+        "moderately played": "Moderately Played",
+        "hp": "Heavily Played",
+        "heavily played": "Heavily Played",
+        "dmg": "Damaged",
+        "damaged": "Damaged",
+        "unopened": "Unopened",
+    }
+    condition = condition_map.get(normalized_condition, condition_text.title())
     if condition == "":
         condition = "Near Mint"
     foil_text = safe_text(foil_value).lower()
@@ -341,8 +381,16 @@ def normalize_tcg_set_name(set_name_value: Any) -> str:
     return set_name_map.get(normalized, set_name)
 
 
+def normalize_product_line(product_line_value: Any) -> str:
+    product_line = safe_text(product_line_value)
+    normalized = normalize_header(product_line)
+    if normalized == "magic the gathering":
+        return "Magic"
+    return product_line
+
+
 def is_manapool_supported_product_line(product_line_value: Any) -> bool:
-    return normalize_header(product_line_value) == "magic"
+    return normalize_header(normalize_product_line(product_line_value)) == "magic"
 
 
 def infer_tcg_rarity_from_scryfall(payload: dict[str, Any]) -> str:
@@ -705,6 +753,81 @@ def _prepare_tcg_rows(tcgplayer_bytes: bytes) -> tuple[list[dict[str, Any]], lis
     return standard_rows, error_rows, []
 
 
+def _prepare_scan_export_rows(scan_bytes: bytes) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    df = parse_csv_bytes(scan_bytes)
+    column_map, missing_columns = map_columns(df, SCAN_EXPORT_COLUMN_ALIASES, SCAN_EXPORT_REQUIRED_COLUMNS)
+    if missing_columns:
+        error = build_error_row({"Source": "Scan export CSV"}, f"Required CSV column missing: {', '.join(missing_columns)}")
+        return [], [error], missing_columns
+
+    prepared_rows: list[dict[str, Any]] = []
+    error_rows: list[dict[str, Any]] = []
+
+    for _, row in df.iterrows():
+        market_price, market_error = try_parse_number(row.get(column_map.get("market_price", ""), ""))
+        manapool_price, manapool_error = try_parse_number(row.get(column_map.get("manapool_price", ""), ""))
+        if market_error:
+            error_rows.append(build_error_row(dict(row), "Invalid numeric value in market_price"))
+            continue
+        if manapool_error:
+            error_rows.append(build_error_row(dict(row), "Invalid numeric value in manapool_price"))
+            continue
+        if market_price is None and manapool_price is None:
+            error_rows.append(build_error_row(dict(row), "Missing both market_price and manapool_price"))
+            continue
+
+        prepared_rows.append(
+            {
+                "Product Line": normalize_product_line(row.get(column_map["game"], "")),
+                "Set Name": safe_text(row.get(column_map["set"], "")),
+                "Product Name": safe_text(row.get(column_map["card_name"], "")),
+                "Number": safe_text(row.get(column_map["card_number"], "")),
+                "Rarity": "",
+                "Condition": normalize_condition(row.get(column_map["condition"], ""), row.get(column_map["variant"], "")),
+                "Language": safe_text(row.get(column_map["language"], "")),
+                "TCGplayer Id": safe_text(row.get(column_map["tcgplayer_id"], "")),
+                "Manapool Id": safe_text(row.get(column_map.get("manapool_id", ""), "")),
+                "Quantity": 1.0,
+                "TCG Market Price": market_price,
+                "TCG Direct Low": None,
+                "Manapool Base Price": manapool_price,
+                "variant": safe_text(row.get(column_map["variant"], "")),
+                "source_payload": dict(row),
+            }
+        )
+
+    if not prepared_rows:
+        return [], error_rows, []
+
+    prepared_df = pd.DataFrame(prepared_rows)
+    aggregated_rows: list[dict[str, Any]] = []
+    group_columns = ["Product Line", "Set Name", "Product Name", "Number", "Condition", "Language", "TCGplayer Id", "Manapool Id"]
+    for _, group in prepared_df.groupby(group_columns, dropna=False, sort=False):
+        first = group.iloc[0]
+        market_series = pd.to_numeric(group["TCG Market Price"], errors="coerce")
+        mana_series = pd.to_numeric(group["Manapool Base Price"], errors="coerce")
+        aggregated_rows.append(
+            {
+                "Product Line": first["Product Line"],
+                "Set Name": first["Set Name"],
+                "Product Name": first["Product Name"],
+                "Number": first["Number"],
+                "Rarity": first["Rarity"],
+                "Condition": first["Condition"],
+                "Language": first["Language"],
+                "TCGplayer Id": first["TCGplayer Id"],
+                "Manapool Id": first["Manapool Id"],
+                "Quantity": float(group["Quantity"].sum()),
+                "TCG Market Price": float(market_series.dropna().iloc[0]) if not market_series.dropna().empty else None,
+                "TCG Direct Low": None,
+                "Manapool Base Price": float(mana_series.dropna().iloc[0]) if not mana_series.dropna().empty else None,
+                "source_payload": first["source_payload"],
+            }
+        )
+
+    return aggregated_rows, error_rows, []
+
+
 def _prepare_manabox_price_rows(file_bytes: bytes, price_label: str) -> tuple[pd.DataFrame, list[dict[str, Any]], list[str]]:
     df = parse_csv_bytes(file_bytes)
     column_map, missing_columns = map_columns(df, MANABOX_COLUMN_ALIASES, MANABOX_REQUIRED_COLUMNS)
@@ -875,25 +998,30 @@ def _build_output_rows(
         total_quantity_imported += quantity
 
         manapool_base_price = standard_row.get("Manapool Base Price")
-        if manapool_base_price is None:
+        market_price = standard_row.get("TCG Market Price")
+        direct_low = standard_row.get("TCG Direct Low")
+
+        if source_mode == "scan_export" and manapool_base_price is None and market_price is None and direct_low is None:
+            missing_price_data_count += 1
+            error_rows.append(build_error_row(standard_row, "Missing Manapool price and TCG price"))
+            continue
+        if source_mode != "scan_export" and manapool_base_price is None:
             missing_price_data_count += 1
             error_rows.append(build_error_row(standard_row, "Missing Manapool price"))
             continue
-
-        market_price = standard_row.get("TCG Market Price")
-        direct_low = standard_row.get("TCG Direct Low")
-        if market_price is None and direct_low is None:
+        if source_mode != "scan_export" and market_price is None and direct_low is None:
             missing_price_data_count += 1
             error_rows.append(build_error_row(standard_row, "Missing both TCG Market Price and TCG Direct Low"))
             continue
 
-        forced_min = manapool_base_price < settings.manapool_min_price
-        manapool_price = max(float(manapool_base_price), settings.manapool_min_price)
+        forced_min = manapool_base_price is not None and manapool_base_price < settings.manapool_min_price
+        manapool_price = max(float(manapool_base_price), settings.manapool_min_price) if manapool_base_price is not None else None
         if forced_min:
             forced_manapool_min_count += 1
 
-        manapool_net = calculate_manapool_net(manapool_price, settings)
-        all_manapool_estimated_net += manapool_net * quantity
+        manapool_net = calculate_manapool_net(manapool_price, settings) if manapool_price is not None else None
+        if manapool_net is not None:
+            all_manapool_estimated_net += manapool_net * quantity
         manapool_supported = is_manapool_supported_product_line(standard_row.get("Product Line", ""))
 
         if direct_low is None:
@@ -922,10 +1050,22 @@ def _build_output_rows(
         reason_parts = []
         if source_mode == "dual_manabox":
             reason_parts.append("Dual ManaBox pricing comparison")
+        elif source_mode == "scan_export":
+            reason_parts.append("Scan export pricing comparison")
         if forced_min:
             reason_parts.append("Forced to Manapool minimum")
 
-        if not manapool_supported:
+        if source_mode == "scan_export" and raw_base_direct_price is None and manapool_net is not None:
+            destination = "manapool"
+            reason_parts.append("No TCG price was available, so the card defaulted to Manapool")
+            bump_exceeded = False
+        elif source_mode == "scan_export" and manapool_net is None and direct_listing_price is not None and direct_net is not None:
+            destination = "direct"
+            reason_parts.append("No Manapool price was available, so the card defaulted to TCGPlayer")
+            if raw_base_direct_price is not None and raw_base_direct_price < settings.direct_min_listing_price:
+                reason_parts.append("Direct floor enforced at minimum price")
+            bump_exceeded = False
+        elif not manapool_supported:
             destination = "direct"
             reason_parts.append("Non-MTG product line routed to TCGPlayer because Manapool only supports Magic")
             if raw_base_direct_price is not None and raw_base_direct_price < settings.direct_min_listing_price:
@@ -965,8 +1105,8 @@ def _build_output_rows(
                     **row_base,
                     "Direct Listing Price": round(direct_listing_price, 2),
                     "Direct Net": round(direct_net, 2),
-                    "Manapool Price": round(manapool_price, 2),
-                    "Manapool Net": round(manapool_net, 2),
+                    "Manapool Price": round(manapool_price, 2) if manapool_price is not None else None,
+                    "Manapool Net": round(manapool_net, 2) if manapool_net is not None else None,
                     "Direct Bump %": direct_bump_pct,
                     "Reason": "; ".join(reason_parts),
                     "_bump_exceeded": bump_exceeded,
@@ -985,13 +1125,13 @@ def _build_output_rows(
             else:
                 direct_csv_rows.append(build_manabox_export_row(standard_row, direct_listing_price))
         else:
-            if manapool_price >= settings.tracked_shipping_threshold:
+            if manapool_price is not None and manapool_price >= settings.tracked_shipping_threshold:
                 reason_parts.append("Review for tracked shipping threshold")
             manapool_rows.append(
                 {
                     **row_base,
-                    "Manapool Price": round(manapool_price, 2),
-                    "Manapool Net": round(manapool_net, 2),
+                    "Manapool Price": round(manapool_price, 2) if manapool_price is not None else None,
+                    "Manapool Net": round(manapool_net, 2) if manapool_net is not None else None,
                     "Base Direct Price": round(base_direct_price, 2) if base_direct_price is not None else None,
                     "Base Direct Net": round(base_direct_net, 2) if base_direct_net is not None else None,
                     "Required Direct Price": round(direct_listing_price, 2) if direct_listing_price is not None else None,
@@ -1095,6 +1235,14 @@ def process_files(
 ) -> ProcessResult:
     if tcgplayer_bytes:
         standard_rows, error_rows, missing_columns = _prepare_tcg_rows(tcgplayer_bytes)
+        source_mode = "tcgplayer"
+        warning_message = None
+        if missing_columns:
+            standard_rows, error_rows, scan_missing_columns = _prepare_scan_export_rows(tcgplayer_bytes)
+            if not scan_missing_columns:
+                missing_columns = []
+                source_mode = "scan_export"
+                warning_message = "Scan export mode detected. Quantity is derived from duplicate scanned rows."
         if missing_columns:
             empty_summary = {
                 "total_rows_imported": 0,
@@ -1128,7 +1276,7 @@ def process_files(
                 warning_message="Required columns are missing from the TCGPlayer CSV.",
                 source_mode="tcgplayer",
             )
-        result = _build_output_rows(standard_rows, settings, "tcgplayer")
+        result = _build_output_rows(standard_rows, settings, source_mode, warning_message)
         if error_rows:
             result.errors_df = pd.concat([result.errors_df, pd.DataFrame(error_rows)], ignore_index=True)
             result.summary["skipped_error_rows"] = len(result.errors_df)

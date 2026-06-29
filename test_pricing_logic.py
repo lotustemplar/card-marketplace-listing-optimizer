@@ -134,6 +134,59 @@ def build_non_mtg_tcg_csv() -> bytes:
     return _csv_bytes(dataframe)
 
 
+def build_scan_export_csv() -> bytes:
+    dataframe = pd.DataFrame(
+        [
+            {
+                "game": "Magic: The Gathering",
+                "set": "Commander: Marvel Super Heroes",
+                "card_name": "Fantastic Elasticity",
+                "card_number": "30",
+                "variant": "Normal",
+                "condition": "NM",
+                "language": "English",
+                "tcgplayer_id": "697542",
+                "manapool_id": "mana-1",
+                "market_price": "1.24",
+                "manapool_price": "0.79",
+                "device_id": "FILE",
+                "timestamp": "2026-06-29T03:13:41.000Z",
+            },
+            {
+                "game": "Magic: The Gathering",
+                "set": "Commander: Marvel Super Heroes",
+                "card_name": "Council of Reeds (Surge Foil)",
+                "card_number": "28",
+                "variant": "Normal",
+                "condition": "NM",
+                "language": "English",
+                "tcgplayer_id": "697538",
+                "manapool_id": "mana-2",
+                "market_price": "",
+                "manapool_price": "2.80",
+                "device_id": "FILE",
+                "timestamp": "2026-06-29T03:13:41.000Z",
+            },
+            {
+                "game": "Magic: The Gathering",
+                "set": "Commander: Marvel Super Heroes",
+                "card_name": "Fantastic Elasticity",
+                "card_number": "30",
+                "variant": "Normal",
+                "condition": "NM",
+                "language": "English",
+                "tcgplayer_id": "697542",
+                "manapool_id": "mana-1",
+                "market_price": "1.24",
+                "manapool_price": "0.79",
+                "device_id": "FILE",
+                "timestamp": "2026-06-29T03:13:50.000Z",
+            },
+        ]
+    )
+    return _csv_bytes(dataframe)
+
+
 def build_manabox_tcg_csv() -> bytes:
     dataframe = pd.DataFrame(
         [
@@ -260,6 +313,28 @@ def test_process_files_non_mtg_routes_to_direct():
     assert len(result.manapool_preview_df) == 0
     assert result.direct_preview_df.iloc[0]["Product Line"] == "Weiss Schwarz"
     assert "Non-MTG product line routed to TCGPlayer because Manapool only supports Magic" in result.direct_preview_df.iloc[0]["Reason"]
+
+
+def test_process_files_accepts_scan_export_format():
+    result = process_files(
+        settings=OptimizerSettings(max_direct_bump_pct=0.20, direct_min_listing_price=0.40),
+        tcgplayer_bytes=build_scan_export_csv(),
+    )
+
+    assert result.source_mode == "scan_export"
+    assert result.summary["skipped_error_rows"] == 0
+    assert result.summary["total_rows_imported"] == 2
+    combined_csv_df = pd.concat([result.direct_csv_df, result.manapool_csv_df], ignore_index=True)
+    fantastic = combined_csv_df[combined_csv_df["Product Name"] == "Fantastic Elasticity"]
+    reeds = combined_csv_df[combined_csv_df["Product Name"] == "Council of Reeds (Surge Foil)"]
+    assert not fantastic.empty
+    assert not reeds.empty
+    assert fantastic.iloc[0]["Total Quantity"] == "2"
+    assert fantastic.iloc[0]["TCGplayer Id"] == "697542"
+    assert fantastic.iloc[0]["Condition"] == "Near Mint"
+    assert reeds.iloc[0]["TCG Market Price"] == ""
+    reason_text = " ".join(result.direct_preview_df["Reason"].astype(str).tolist() + result.manapool_preview_df["Reason"].astype(str).tolist())
+    assert "Scan export pricing comparison" in reason_text
 
 
 @patch(
